@@ -210,10 +210,36 @@ Pixiv 的 Access Token（由用户配置的 Refresh Token 换取）有效期约 
 
 配套防御措施：
 - `search_by_tag` 检测 API 返回的 `error` 字段（对象和字典两种类型均覆盖）
+- `search_by_tag` 首页空 → **即时刷新 Access Token 并重试一次**（自愈机制）
 - `find_fresh_illust` 首页空 → 立即跳过该标签翻页，不浪费后续 API 调用
 - `search_by_tags` 连续 ≥3 个标签首页全空 → 红色告警"极可能是 token 过期"
 - `_call_llm` 专用 LLM 不可用时自动回退到 AstrBot 默认 LLM（之前无此回退）
+- `_consecutive_empty` 计数器 + `get_empty_search_hint()` → 搜索失败时按连续次数给出分级建议（1次提示/2次建议检查/3次+强烈建议刷新token）
 
+### 多图作品发送（漫画/图集）
+
+Pixiv 漫画和插画图集包含多张图片。`IllustInfo` 通过 `page_count` 和 `meta_pages`（`_normalize_meta_pages()` 提取）记录各页 URL。
+
+发送逻辑集中在 `main.py` 的 `_send_illust_images()`：
+- 单图：直接下载发送（原逻辑不变）
+- 多图：逐页下载，按 `max_pages_per_illust`（默认 3）限制页数
+- 超出上限时追加提示「该作品共 X 页，完整版请访问官网」
+
+`cmd_pixiv_id` 和 `_search_and_send_images` 均通过此方法发送，确保指令搜索和自然语言搜索行为一致。
+
+### 定时撤回
+
+`_schedule_recall()` 在每张图片 yield 后创建后台 asyncio 任务，等待 `recall_after_seconds` 秒后尝试撤回。撤回 API 兼容多种 AstrBot 版本（`event.recall_message` / `event.delete_message` / `platform.delete_msg`），失败时静默忽略。设为 0 则禁用。
+
+### 视觉模型内容审核
+
+开启 `content_moderation_enabled` 后，`_check_and_moderate()` 在图片发送后执行：
+1. `_moderate_image()` 用 Pillow 压缩图片到 ~100KB、Base64 编码
+2. 通过 `context.llm_generate(image=...)` 发送给视觉 LLM
+3. 解析模型返回的 0~10 评分
+4. 若评分 > `nsfw_threshold`（默认 8），立即撤回并调用 `_generate_moderation_apology()` 生成带人格预设的道歉回复
+
+视觉模型可通过 `content_moderation_provider`（`_special: select_provider`）独立选择。
 ### 待扩展功能
 
 - [x] 多图智能发送（LLM 识别数量）
@@ -222,6 +248,11 @@ Pixiv 的 Access Token（由用户配置的 Refresh Token 换取）有效期约 
 - [x] Token 自动刷新 + 过期告警
 - [x] 首页空跳过翻页优化
 - [x] LLM 调用双回退（专用→默认→关键词）
+- [x] 多图作品支持（漫画/图集按页发送）
+- [x] 即时自愈：搜索空→刷新token重试
+- [x] 智能失败建议：按连续空搜索次数分级提示
+- [x] 定时撤回：图片发送后 N 秒自动撤回
+- [x] 视觉模型内容审核：压缩→视觉 LLM 评分→超阈值撤回+道歉
 - [ ] 画师搜索
 - [ ] 排行榜浏览
 - [ ] WebUI 管理面板

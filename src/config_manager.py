@@ -40,6 +40,11 @@ DEFAULT_CONFIG = {
     "search_sort": "popular_desc",
     "search_max_pages": 10,
     "max_images_per_request": 3,
+    "max_pages_per_illust": 3,
+    "recall_after_seconds": 60,
+    "content_moderation_enabled": False,
+    "content_moderation_provider": "",
+    "nsfw_threshold": 9,
 }
 
 

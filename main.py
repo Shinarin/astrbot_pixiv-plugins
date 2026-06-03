@@ -268,25 +268,9 @@ class AstrBotPixivPlugin(Star):
                 )
                 return
 
-            # 下载图片（按质量设置选择 URL）
-            quality = self.config_mgr.get("image_quality", "large")
-            dl_url = info.get_image_url_for_quality(quality)
-            image_bytes = await self.pixiv_client.download_image(dl_url)
-            if image_bytes is None:
-                yield event.plain_result(f"❌ 图片下载失败，请稍后重试。\n{info.page_url}")
-                return
-
             session_id = event.get_session_id()
-            self.dedup_mgr.mark_sent(info.illust_id, session_id)
-
-            img_path = self._save_temp_image(image_bytes, info.illust_id)
-            info_cfg = self.config_mgr.get("show_image_info", {})
-            result = event.make_result()
-            result.file_image(img_path)
-            msg = info.to_message_text(info_cfg)
-            if msg:
-                result.message(msg)
-            yield result
+            async for r in self._send_illust_images(event, info, session_id, 1, 1):
+                yield r
 
         except Exception as e:
             logger.error(f"[pixiv] cmd_pixiv_id 错误: {e}", exc_info=True)
@@ -611,33 +595,285 @@ class AstrBotPixivPlugin(Star):
                 )
                 if info is None:
                     if sent == 0:
-                        yield event.plain_result(f"😔 没找到 {tag} 相关的图，换个关键词试试？")
+                        hint = self.pixiv_client.get_empty_search_hint()
+                        msg = f"😔 没找到 {tag} 相关的图，换个关键词试试？"
+                        if hint:
+                            msg += f"\n\n{hint}"
+                        yield event.plain_result(msg)
                     else:
                         yield event.plain_result(f"（共找到 {sent} 张，没有更多了）")
                     return
 
-                quality = self.config_mgr.get("image_quality", "large")
-                dl_url = info.get_image_url_for_quality(quality)
-                image_bytes = await self.pixiv_client.download_image(dl_url)
-                if image_bytes is None:
-                    continue
-
-                self.dedup_mgr.mark_sent(info.illust_id, session_id)
-                img_path = self._save_temp_image(image_bytes, info.illust_id)
-                info_cfg = self.config_mgr.get("show_image_info", {})
-                result = event.make_result()
-                result.file_image(img_path)
-                msg = info.to_message_text(info_cfg)
-                if count > 1 and msg:
-                    msg = f"({sent + 1}/{count})\n{msg}"
-                if msg:
-                    result.message(msg)
-                yield result
+                async for r in self._send_illust_images(
+                    event, info, session_id, sent + 1, count,
+                ):
+                    yield r
                 sent += 1
 
             except Exception as e:
                 logger.error(f"[pixiv] _search_and_send_images 第{i}张异常: {e}")
                 continue
+
+    # ==================================================================
+    # 核心: 发送单张作品（支持多页漫画/图集 + 定时撤回 + 内容审核）
+    # ==================================================================
+
+    async def _send_illust_images(
+        self, event: AstrMessageEvent, info,
+        session_id: str, index: int = 1, total: int = 1,
+    ):
+        """
+        发送一个作品的所有图片。单图直接发；多图按 max_pages_per_illust 限制。
+        支持定时撤回和视觉模型内容审核。
+        """
+        quality = self.config_mgr.get("image_quality", "large")
+        info_cfg = self.config_mgr.get("show_image_info", {})
+        max_pages = self.config_mgr.get("max_pages_per_illust", 3)
+        recall_sec = self.config_mgr.get("recall_after_seconds", 60)
+        moderation_on = self.config_mgr.get("content_moderation_enabled", False)
+
+        if info.is_multi_page:
+            page_urls = info.get_page_urls_for_quality(quality, max_pages)
+            total_pages = info.page_count
+
+            for pi, page_url in enumerate(page_urls):
+                page_bytes = await self.pixiv_client.download_image(page_url)
+                if page_bytes is None:
+                    continue
+                img_path = self._save_temp_image(page_bytes, f"{info.illust_id}_p{pi+1}")
+                result = event.make_result()
+                result.file_image(img_path)
+                page_label = f"({pi+1}/{min(total_pages, max_pages)})"
+                if total > 1:
+                    page_label = f"[{index}/{total}] {page_label}"
+                msg_parts = [page_label]
+                txt = info.to_message_text(info_cfg)
+                if txt:
+                    msg_parts.append(txt)
+                result.message("\n".join(msg_parts))
+                yield result
+
+                # 定时撤回 + 内容审核
+                self._schedule_recall(event, result, recall_sec)
+                if moderation_on:
+                    apology = await self._check_and_moderate(event, page_bytes, info, img_path)
+                    if apology:
+                        yield event.plain_result(apology)
+
+            self.dedup_mgr.mark_sent(info.illust_id, session_id)
+
+            if total_pages > max_pages:
+                yield event.plain_result(
+                    f"📄 该作品共 {total_pages} 页，已发送前 {max_pages} 页。\n"
+                    f"完整内容请访问: {info.page_url}"
+                )
+        else:
+            dl_url = info.get_image_url_for_quality(quality)
+            image_bytes = await self.pixiv_client.download_image(dl_url)
+            if image_bytes is None:
+                yield event.plain_result(f"❌ 图片下载失败，请稍后重试。\n{info.page_url}")
+                return
+
+            self.dedup_mgr.mark_sent(info.illust_id, session_id)
+            img_path = self._save_temp_image(image_bytes, info.illust_id)
+            result = event.make_result()
+            result.file_image(img_path)
+            msg = info.to_message_text(info_cfg)
+            if total > 1 and msg:
+                msg = f"({index}/{total})\n{msg}"
+            if msg:
+                result.message(msg)
+            yield result
+
+            # 定时撤回 + 内容审核
+            self._schedule_recall(event, result, recall_sec)
+            if moderation_on:
+                apology = await self._check_and_moderate(event, image_bytes, info, img_path)
+                if apology:
+                    yield event.plain_result(apology)
+
+    # ==================================================================
+    # 定时撤回
+    # ==================================================================
+
+    def _schedule_recall(self, event: AstrMessageEvent, result, seconds: int) -> None:
+        """调度定时撤回任务。seconds=0 则跳过。"""
+        if seconds <= 0:
+            return
+        asyncio.create_task(self._recall_after(event, result, seconds))
+
+    async def _recall_after(self, event: AstrMessageEvent, result, seconds: int) -> None:
+        """等待指定秒数后尝试撤回消息。"""
+        await asyncio.sleep(seconds)
+        try:
+            # 尝试多种撤回 API（兼容不同 AstrBot 版本和平台）
+            if hasattr(event, 'recall_message'):
+                await event.recall_message(result)
+            elif hasattr(event, 'delete_message'):
+                await event.delete_message(result)
+            elif hasattr(event, 'get_platform'):
+                platform = event.get_platform()
+                if hasattr(platform, 'delete_msg'):
+                    # 尝试获取 message_id
+                    msg_id = getattr(result, 'message_id', None) or getattr(result, 'msg_id', None)
+                    if msg_id:
+                        await platform.delete_msg(message_id=msg_id)
+            else:
+                logger.debug("[pixiv] 撤回 API 不可用，跳过定时撤回")
+        except Exception as e:
+            logger.debug(f"[pixiv] 撤回消息失败（非关键）: {e}")
+
+    # ==================================================================
+    # 图片内容审核
+    # ==================================================================
+
+    async def _check_and_moderate(
+        self, event: AstrMessageEvent, image_bytes: bytes,
+        info, img_path: str,
+    ) -> str | None:
+        """用视觉模型审核图片，评分超过阈值则撤回并返回道歉消息。返回 None 表示无需处理。"""
+        try:
+            score = await self._moderate_image(image_bytes)
+            if score is None:
+                return None
+
+            threshold = self.config_mgr.get("nsfw_threshold", 8)
+            logger.info(
+                f"[pixiv] 内容审核: illust_id={info.illust_id}, "
+                f"score={score}, threshold={threshold}"
+            )
+
+            if score > threshold:
+                # 撤回图片
+                await self._recall_after(event, None, 1)
+                # 生成人格预设的道歉
+                apology = await self._generate_moderation_apology(event, info)
+                return apology
+            return None
+        except Exception as e:
+            logger.debug(f"[pixiv] 内容审核异常（非关键）: {e}")
+            return None
+
+    async def _moderate_image(self, image_bytes: bytes) -> int | None:
+        """
+        压缩图片并发送给视觉模型，获取 0~10 的暴露程度评分。
+        返回 None 表示审核失败（静默放过）。
+        """
+        try:
+            # ---- 预检：所选模型是否支持图片识别 ----
+            provider_id = self.config_mgr.get("content_moderation_provider", "")
+            if provider_id and not self._check_provider_supports_image(provider_id):
+                logger.info("[pixiv] 内容审核跳过：所选模型不支持图片识别")
+                return None
+
+            from PIL import Image
+            import io
+            import base64
+
+            # 压缩到约 100KB
+            img = Image.open(io.BytesIO(image_bytes))
+            img = img.convert("RGB")
+            quality = 85
+            max_size = 100 * 1024
+            buf = io.BytesIO()
+            # 先缩放到合理尺寸
+            if max(img.size) > 1024:
+                ratio = 1024 / max(img.size)
+                new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
+                img = img.resize(new_size, Image.LANCZOS)
+            while True:
+                buf.seek(0)
+                buf.truncate()
+                img.save(buf, format="JPEG", quality=quality)
+                if buf.tell() <= max_size or quality <= 20:
+                    break
+                quality -= 10
+            compressed = buf.getvalue()
+
+            # Base64 编码
+            b64 = base64.b64encode(compressed).decode("utf-8")
+            image_data = f"data:image/jpeg;base64,{b64}"
+
+            # 调用视觉模型
+            provider_id = self.config_mgr.get("content_moderation_provider", "")
+            prompt = (
+                "请对这张图片进行内容安全审核，只关注色情/暴露程度。"
+                "给出一个 0~10 的整数评分：0=完全正常，5=有些暴露，10=极端色情。"
+                "只回复一个数字，不要解释。"
+            )
+
+            if provider_id and self.context:
+                resp = await self.context.llm_generate(
+                    chat_provider_id=provider_id,
+                    prompt=prompt,
+                    image=image_data,
+                )
+            elif self.context:
+                resp = await self.context.llm_generate(
+                    prompt=prompt,
+                    image=image_data,
+                )
+            else:
+                return None
+
+            text = resp.completion_text.strip() if hasattr(resp, 'completion_text') else str(resp).strip()
+            import re
+            match = re.search(r'\b(\d+)\b', text)
+            if match:
+                score = int(match.group(1))
+                return max(0, min(10, score))
+            return None
+        except Exception as e:
+            logger.debug(f"[pixiv] 视觉模型审核调用失败: {e}")
+            return None
+
+    def _check_provider_supports_image(self, provider_id: str) -> bool:
+        """
+        检查指定 provider 是否支持图片输入（通过 model_metadata.modalities.input）。
+        无法判断时返回 True（宁可放过，不误判）。
+        """
+        try:
+            manager = getattr(self.context, 'provider_manager', None)
+            if not manager:
+                return True  # 无法判断 → 假定支持
+            inst = getattr(manager, 'inst_map', {}).get(provider_id)
+            if not inst:
+                return True
+            meta = getattr(inst, 'meta', None)
+            if meta:
+                mm = getattr(meta(), 'model_metadata', None) if callable(meta) else getattr(meta, 'model_metadata', None)
+            else:
+                return True
+            if not mm:
+                return True
+            if isinstance(mm, dict):
+                inputs = mm.get('modalities', {}).get('input', [])
+            elif hasattr(mm, 'modalities'):
+                inputs = getattr(getattr(mm, 'modalities', None), 'input', None) or []
+            else:
+                return True
+            return 'image' in (inputs or [])
+        except Exception:
+            return True  # 无法判断 → 假定支持
+
+    async def _generate_moderation_apology(self, event: AstrMessageEvent, info) -> str:
+        """生成内容审核触发的道歉回复（带人格预设）。"""
+        try:
+            await self._inject_persona(event)
+            persona = self.intent_parser._persona_prompt or ""
+            prompt = (
+                f"用户请求的图片（{info.title}）因内容审核被撤回。"
+                f"请以拟人化方式简短道歉（不超过40字），说明该图不合适。"
+            )
+            reply = await self.intent_parser._call_llm(
+                prompt=prompt,
+                system_prompt=persona or "你是友好的 Pixiv 搜索助手。",
+            )
+            if reply and len(reply.strip()) >= 3:
+                return f"⛔ {reply.strip()}"
+        except Exception:
+            pass
+        return "⛔ 抱歉，该图片可能包含不适宜内容，已自动撤回。"
 
     # ==================================================================
     # 工具方法

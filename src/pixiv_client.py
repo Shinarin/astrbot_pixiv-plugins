@@ -79,6 +79,8 @@ class IllustInfo:
         x_restrict:  R18 级别 (0=安全, 1=R18, 2=R18G)
         bookmarks:   收藏数
         views:       浏览数
+        page_count:  作品总页数（漫画/图集 > 1）
+        all_page_urls: 多图作品各页的 image_urls 列表
         width:       图片宽度
         height:      图片高度
     """
@@ -88,6 +90,7 @@ class IllustInfo:
         "image_url", "page_url", "tags", "x_restrict",
         "bookmarks", "views",
         "url_original", "url_large", "url_medium", "url_square",
+        "page_count", "all_page_urls",
         "width", "height",
     )
 
@@ -118,6 +121,17 @@ class IllustInfo:
         self.width: int = illust_data.get("width", 0)
         self.height: int = illust_data.get("height", 0)
 
+        # 多图作品（漫画/图集）
+        self.page_count: int = illust_data.get("page_count", 1)
+        meta_pages = illust_data.get("meta_pages", [])
+        if isinstance(meta_pages, list) and meta_pages:
+            self.all_page_urls: list[dict] = []
+            for page in meta_pages:
+                if isinstance(page, dict):
+                    self.all_page_urls.append(page.get("image_urls", {}))
+        else:
+            self.all_page_urls: list[dict] = []
+
     @property
     def is_r18(self) -> bool:
         """该作品是否为 R18 内容。"""
@@ -144,6 +158,37 @@ class IllustInfo:
             return self.url_medium
         # 默认 fallback: large → medium → square
         return self.url_large or self.url_medium or self.url_square or self.image_url
+
+    @property
+    def is_multi_page(self) -> bool:
+        """是否为多图作品（漫画/图集）。"""
+        return self.page_count > 1 and len(self.all_page_urls) > 0
+
+    def get_page_urls_for_quality(self, quality: str, max_pages: int = 3) -> list[str]:
+        """
+        返回多图作品各页的图片 URL，按质量筛选，最多 max_pages 张。
+
+        Args:
+            quality:    "original" | "large" | "medium"
+            max_pages:  最多返回页数
+
+        Returns:
+            各页图片 URL 列表。
+        """
+        urls = []
+        for page_urls in self.all_page_urls[:max_pages]:
+            if quality == "original" and page_urls.get("original"):
+                urls.append(page_urls["original"])
+            elif quality == "large" and page_urls.get("large"):
+                urls.append(page_urls["large"])
+            elif quality == "medium" and page_urls.get("medium"):
+                urls.append(page_urls["medium"])
+            else:
+                # fallback: large → medium → square
+                url = page_urls.get("large") or page_urls.get("medium") or page_urls.get("square_medium") or ""
+                if url:
+                    urls.append(url)
+        return urls
 
     def to_message_text(self, info_config: dict | None = None) -> str | None:
         """
@@ -180,6 +225,30 @@ class IllustInfo:
             return None  # 全部关闭，不显示任何信息
 
         return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# 辅助函数: 规范化 meta_pages
+# ---------------------------------------------------------------------------
+
+def _normalize_meta_pages(illust) -> list[dict]:
+    """从 pixivpy3 的 illust 对象中提取 meta_pages（多图作品各页 URL）。"""
+    pages = []
+    raw_pages = getattr(illust, 'meta_pages', None) if hasattr(illust, 'meta_pages') else None
+    if not raw_pages:
+        return pages
+    for p in raw_pages:
+        if hasattr(p, 'image_urls'):
+            pages.append({
+                "image_urls": {
+                    "large": getattr(p.image_urls, 'large', '') if hasattr(p.image_urls, 'large') else '',
+                    "medium": getattr(p.image_urls, 'medium', '') if hasattr(p.image_urls, 'medium') else '',
+                    "square_medium": getattr(p.image_urls, 'square_medium', '') if hasattr(p.image_urls, 'square_medium') else '',
+                }
+            })
+        elif isinstance(p, dict):
+            pages.append({"image_urls": p.get("image_urls", {})})
+    return pages
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +298,8 @@ class PixivClient:
         self._http: Optional[httpx.AsyncClient] = None
         # 后台 token 自动刷新任务
         self._auto_refresh_task: Optional[asyncio.Task] = None
+        # 连续空搜索计数（成功搜索后清零）
+        self._consecutive_empty: int = 0
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -357,6 +428,8 @@ class PixivClient:
                         "x_restrict": getattr(illust, 'x_restrict', 0),
                         "width": getattr(illust, 'width', 0),
                         "height": getattr(illust, 'height', 0),
+                        "page_count": getattr(illust, 'page_count', 1),
+                        "meta_pages": _normalize_meta_pages(illust),
                     }
                     return IllustInfo(illust_dict)
                 else:
@@ -447,11 +520,57 @@ class PixivClient:
                     if page == 1:
                         logger.warning(
                             f"[pixiv:client] ⚠️ 首页无结果: tag='{tag}' → "
-                            f"该标签在 Pixiv 可能不存在或 API 认证已失效"
+                            f"尝试刷新 Access Token 后重试..."
                         )
+                        # 即时自愈: 刷新 token 后重试一次
+                        token = self._config.get("pixiv_refresh_token", "")
+                        if token:
+                            try:
+                                await self.login(token, start_refresh_loop=False)
+                                await self._rate_limit_wait()
+                                result = await asyncio.to_thread(
+                                    self._api.search_illust,
+                                    word=tag,
+                                    search_target="partial_match_for_tags",
+                                    sort=self._config.get("search_sort", "popular_desc"),
+                                    duration=None,
+                                    offset=offset,
+                                )
+                                if hasattr(result, 'illusts'):
+                                    illusts = result.illusts
+                                elif isinstance(result, dict):
+                                    illusts = result.get("illusts", [])
+                                else:
+                                    illusts = []
+                                if illusts:
+                                    logger.info(
+                                        f"[pixiv:client] 🔄 token 刷新后重试成功: "
+                                        f"tag='{tag}', count={len(illusts)}"
+                                    )
+                                    # 继续下面的过滤逻辑（不 return）
+                                else:
+                                    self._consecutive_empty += 1
+                                    logger.warning(
+                                        f"[pixiv:client] ⚠️ token 刷新后仍无结果: "
+                                        f"tag='{tag}' (连续空搜索 {self._consecutive_empty} 次)"
+                                    )
+                                    return []
+                            except Exception as e:
+                                self._consecutive_empty += 1
+                                logger.error(
+                                    f"[pixiv:client] ⚠️ token 即时刷新失败: {e}"
+                                )
+                                return []
+                        else:
+                            self._consecutive_empty += 1
+                            logger.warning(
+                                f"[pixiv:client] ⚠️ 首页无结果且未配置 refresh_token: "
+                                f"tag='{tag}'"
+                            )
+                            return []
                     else:
                         logger.debug(f"[pixiv:client] 第{page}页无结果: tag='{tag}'")
-                    return []
+                        return []
 
                 # 转换结果 + 质量过滤 + 标签黑名单
                 max_results = self._config.get("search_max_results", 10)
@@ -488,6 +607,7 @@ class PixivClient:
                     f"[pixiv:client] 标签'{tag}' → 候选{len(infos)}个 "
                     f"(max❤️{infos[0].bookmarks})"
                 )
+                self.note_search_success()
                 return infos
 
             except PixivAuthError:
@@ -607,6 +727,8 @@ class PixivClient:
                     },
                     "width": getattr(illust_data, 'width', 0),
                     "height": getattr(illust_data, 'height', 0),
+                    "page_count": getattr(illust_data, 'page_count', 1),
+                    "meta_pages": _normalize_meta_pages(illust_data),
                 }
             elif isinstance(illust_data, dict):
                 return illust_data
@@ -702,6 +824,7 @@ class PixivClient:
                 f"[pixiv:client] 从{fresh_pool[0].bookmarks}~{fresh_pool[-1].bookmarks}❤️"
                 f" 池({len(fresh_pool)}张) 随机选中: id={picked.illust_id}, ❤️{picked.bookmarks}"
             )
+            self.note_search_success()
             return picked
 
         # 回退: 无结果 → 关闭质量过滤再搜
@@ -762,6 +885,34 @@ class PixivClient:
                 "未登录 Pixiv。请先配置 pixiv_refresh_token。\n"
                 "使用指令: /pixiv config set pixiv_refresh_token <your_token>"
             )
+
+    def note_search_success(self) -> None:
+        """搜索成功后重置连续空搜索计数。"""
+        if self._consecutive_empty > 0:
+            logger.debug(f"[pixiv:client] 搜索恢复，重置空搜索计数 (之前 {self._consecutive_empty} 次)")
+        self._consecutive_empty = 0
+
+    def get_empty_search_hint(self) -> str:
+        """根据连续空搜索次数返回用户友好的建议。"""
+        n = self._consecutive_empty
+        if n <= 0:
+            return ""
+        if n == 1:
+            return "💡 提示：如果持续无结果，可能是 Access Token 已过期，等待自动刷新或重启插件。"
+        if n == 2:
+            return (
+                "💡 已连续 2 次搜索无结果。建议：\n"
+                "• 检查 Pixiv 是否可正常访问\n"
+                "• 尝试在 WebUI 重新填写 Refresh Token\n"
+                "• 或等待插件自动刷新（最长 50 分钟）"
+            )
+        # n >= 3
+        return (
+            f"⚠️ 已连续 {n} 次搜索无结果！强烈建议：\n"
+            f"• 立即在 WebUI 插件设置中重新填写 Refresh Token\n"
+            f"• 使用 /pixiv test 诊断 API 连通性\n"
+            f"• 检查网络是否能访问 pixiv.net"
+        )
 
     # ------------------------------------------------------------------
     # 后台 token 自动刷新

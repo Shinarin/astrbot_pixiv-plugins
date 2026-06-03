@@ -121,6 +121,13 @@
     "options": [1, 2, 3, 4, 5],
     "hint": "用户说'来多张'时发送此数量的图片，也是单次请求的上限。"
   },
+  "max_pages_per_illust": {
+    "type": "int",
+    "description": "多图作品最多发送页数",
+    "default": 3,
+    "options": [1, 2, 3, 5],
+    "hint": "当作品包含多张图片（漫画/图集）时，最多发送多少页。超出的页数会提示用户前往官网查看。"
+  },
   "search_sort": {
     "type": "string",
     "description": "搜索结果排序",
@@ -135,5 +142,32 @@
     "default": 10,
     "options": [3, 5, 10, 15, 20],
     "hint": "每个标签最多翻多少页找图。加大可提升命中率，但搜索变慢。"
+  },
+  "recall_after_seconds": {
+    "type": "int",
+    "description": "图片定时撤回（秒）",
+    "default": 60,
+    "options": [0, 30, 60, 120, 300],
+    "hint": "图片发送后多少秒自动撤回。设为 0 则禁用定时撤回。"
+  },
+  "content_moderation_enabled": {
+    "type": "bool",
+    "description": "启用图片内容审核",
+    "default": false,
+    "hint": "开启后，每张图片发送后会用视觉模型二次检测。需要先在 AstrBot 中配置视觉模型。"
+  },
+  "content_moderation_provider": {
+    "type": "string",
+    "description": "内容审核视觉模型",
+    "default": "",
+    "hint": "用于图片内容审核的视觉模型。请从下拉列表中选择一个支持识图/图片转述的模型。留空则使用 AstrBot 默认视觉模型。",
+    "_special": "select_provider"
+  },
+  "nsfw_threshold": {
+    "type": "int",
+    "description": "NSFW 审核阈值",
+    "default": 9,
+    "options": [5, 6, 7, 8, 9],
+    "hint": "视觉模型对图片评分 0~10（越高越暴露）。超过此阈值则自动撤回并道歉。默认 9，即评分 10 触发撤回。"
   }
 }
