@@ -89,42 +89,52 @@ pip install pixivpy3 httpx Pillow
 
 #### 🔑 如何获取 Pixiv Refresh Token？
 
-Refresh Token 是 Pixiv OAuth 登录后颁发的一个长期凭证，pixivpy3 依赖它来调用 API。以下提供两种获取方式：
+Refresh Token 是 Pixiv OAuth 登录后颁发的一个长期凭证，pixivpy3 依赖它来调用 API。以下提供三种获取方式：
 
 ---
 
-**方法一：浏览器 DevTools 提取（推荐，无需装额外工具）**
+**方法一：gppt（推荐命令行工具）**
 
-> 适用于 Chrome / Edge / Firefox，操作完全一致。
-
-| 步骤 | 操作 |
-|:--:|------|
-| **①** | 打开浏览器，访问 **https://www.pixiv.net** 并**登录**你的 Pixiv 账号 |
-| **②** | 按 **F12** 打开开发者工具，切换到 **Application**（应用程序）标签 |
-| **③** | 左侧栏：**Storage → Local Storage → https://www.pixiv.net** |
-| **④** | 在右侧表格中找到 Key 为 `refresh_token` 的行（或包含 `token` 字样的 key） |
-| **⑤** | **双击**该行的 Value 列，全选复制——这就是你的 Refresh Token ✅ |
-
-> ⚠️ 如果在 Local Storage 中找不到，尝试在 **Cookies** 中查找 `refresh_token`，或切换到 **Network** 标签，刷新页面后搜索 `token`，在 `/auth/token` 请求的响应体中也能找到。
-
----
-
-**方法二：官方脚本获取**
-
-> pixivpy3 官方提供了登录脚本，适合无法从浏览器提取的情况。
+> [gppt](https://github.com/eggplants/get-pixivpy-token) 是基于 Selenium 的命令行工具，操作简单，是目前主流选择。
 
 ```bash
-# 1. 下载官方登录脚本
-wget https://gist.githubusercontent.com/ZipFile/c9ebedb224406f4f11845ab700124362/raw/pixiv_auth.py
+# 1. 安装
+pip install gppt
 
-# 2. 运行登录（需要 pip install requests）
-python pixiv_auth.py login
-
-# 3. 按提示输入 Pixiv 账号密码（可能需要代理）
-# 4. 登录成功后终端会打印 refresh_token，复制即可
+# 2. 获取 Token
+gppt login
 ```
 
-> ⚠️ 如果 Pixiv 开启了二次验证，方法二可能失败，建议用方法一。
+运行后会打开浏览器窗口，正常登录 Pixiv 账号即可。登录成功后 `refresh_token` 会直接打印在终端。
+
+> 💡 进阶：也支持无头模式 `gppt login-headless -u <用户名> -p <密码>`。
+
+---
+
+**方法二：pixiv_auth.py 脚本**
+
+> pixivpy3 官方提供的登录脚本，无需安装浏览器驱动。
+
+```bash
+# 下载并运行
+wget https://gist.githubusercontent.com/ZipFile/c9ebedb224406f4f11845ab700124362/raw/pixiv_auth.py
+python pixiv_auth.py login
+```
+
+按提示输入 Pixiv 账号密码，登录成功后终端会打印 `refresh_token`。
+
+> 📎 Gist 地址：https://gist.github.com/ZipFile/c9ebedb224406f4f11845ab700124362
+
+---
+
+**方法三：pixiv-token（备选）**
+
+> 基于 Playwright 的同类工具，适合遇到兼容性问题时使用。
+
+```bash
+pip install pixiv-token
+# 按命令行提示操作获取 Token
+```
 
 ---
 
@@ -196,6 +206,19 @@ WebUI → 插件设置 → 填入 Pixiv Refresh Token
 
 **Q: 非图片消息被拦截？**
 不会。LLM 判断无关的消息原样透传 AstrBot。
+
+**Q: 为什么偶尔会搜不到图，过一会儿又正常了？**
+
+可能的原因及排查顺序：
+
+| 优先级 | 原因 | 说明 |
+|:--:|------|------|
+| ① | **Token 过期** | 插件通过你填的 Refresh Token 自动换取 Access Token（约 1 小时有效），后者过期后 Pixiv API 会静默返回空。插件已内置每 50 分钟用 Refresh Token 自动续期，正常情况下不会出现。如果遇到，等待最多 50 分钟自动恢复，或重启插件触发立即刷新。 |
+| ② | **标签不存在** | LLM 富化后的标签在 Pixiv 上无结果（如冷门音译）。尝试换用更通用的标签重试。 |
+| ③ | **网络波动** | 跨境链路偶发超时或丢包，Pixiv API 可能临时不可达。通常几分钟后自愈。 |
+| ④ | **质量过滤过严** | `min_bookmarks` 设太高导致合格作品被过滤。插件会自动回退找最佳，但如果首页本就为空则跳过。可尝试调低阈值。 |
+
+> 🔍 查看 AstrBot 日志中的 `[pixiv:client]` 前缀消息可辅助定位原因。连续出现 `🔴 连续 N 个标签首页无结果` 提示时，请重新填写 Refresh Token。
 
 **Q: 为什么 /pixiv r18 切换后又被改回去了？**
 可能是其他用户通过自然语言触发了模式切换。在设置中配置 `r18_admin_id` 可限制只有管理员能切换。

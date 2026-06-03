@@ -2,7 +2,7 @@
   "pixiv_refresh_token": {
     "type": "string",
     "description": "Pixiv Refresh Token",
-    "hint": "获取方式：登录 pixiv.net 后，使用浏览器开发者工具 (F12 → Application → Cookies) 或第三方工具提取 refresh_token。插件重启后自动重新登录。",
+    "hint": "获取方式：推荐使用 gppt（pip install gppt && gppt login），或参考 README 中其他方法。插件重启后自动重新登录。",
     "default": ""
   },
   "r18_mode": {

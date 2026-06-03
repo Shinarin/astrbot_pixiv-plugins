@@ -213,6 +213,9 @@ class PixivClient:
         ),
     }
 
+    # Access Token（由 refresh_token 换取）有效期约 1 小时，每 50 分钟自动刷新
+    _AUTO_REFRESH_INTERVAL = 3000  # 秒
+
     def __init__(self, config_mgr) -> None:
         """
         Args:
@@ -224,17 +227,21 @@ class PixivClient:
         self._last_request_time: float = 0.0
         # HTTP 客户端（用于下载图片，复用连接池）
         self._http: Optional[httpx.AsyncClient] = None
+        # 后台 token 自动刷新任务
+        self._auto_refresh_task: Optional[asyncio.Task] = None
 
     # ------------------------------------------------------------------
     # 生命周期
     # ------------------------------------------------------------------
 
-    async def login(self, refresh_token: str) -> bool:
+    async def login(self, refresh_token: str, start_refresh_loop: bool = True) -> bool:
         """
         使用 refresh_token 登录 Pixiv。
 
         Args:
             refresh_token: Pixiv 的 refresh_token 字符串。
+            start_refresh_loop: 是否启动后台自动刷新任务（首次登录传 True，
+                                自动刷新内部调用时传 False 避免递归）。
 
         Returns:
             True 表示登录成功。
@@ -251,19 +258,27 @@ class PixivClient:
                 refresh_token=refresh_token,
             )
             self._is_logged_in = True
+            if self._http:
+                await self._http.aclose()
             self._http = httpx.AsyncClient(
                 headers=self._DOWNLOAD_HEADERS,
                 timeout=httpx.Timeout(30.0),
                 follow_redirects=True,
             )
             logger.info("[pixiv:client] 登录成功")
+
+            # 启动后台 token 自动刷新（仅首次登录）
+            if start_refresh_loop:
+                self._start_auto_refresh()
+
             return True
         except Exception as e:
             self._is_logged_in = False
             raise PixivAuthError(f"Pixiv 登录失败: {e}") from e
 
     async def close(self) -> None:
-        """关闭 HTTP 客户端连接。"""
+        """关闭 HTTP 客户端连接和后台刷新任务。"""
+        self._cancel_auto_refresh()
         if self._http:
             await self._http.aclose()
             self._http = None
@@ -404,13 +419,23 @@ class PixivClient:
 
                 # 兼容对象和 dict 两种返回类型
                 if hasattr(result, 'illusts'):
+                    # 先检查是否有错误字段（token 过期时可能静默返回空）
+                    if hasattr(result, 'error') and result.error:
+                        logger.error(
+                            f"[pixiv:client] ⚠️ API 返回错误 (token可能已过期): "
+                            f"tag='{tag}', error={result.error}"
+                        )
+                        return []
                     illusts = result.illusts
                     logger.info(f"[pixiv:client] (attr) illusts count={len(illusts) if illusts else 0}")
                 elif isinstance(result, dict):
                     keys = list(result.keys())
                     logger.info(f"[pixiv:client] (dict) keys={keys}")
                     if "error" in result:
-                        logger.error(f"[pixiv:client] API错误: {result}")
+                        logger.error(
+                            f"[pixiv:client] ⚠️ API 返回错误 (token可能已过期): "
+                            f"tag='{tag}', error={result['error']}"
+                        )
                         return []
                     illusts = result.get("illusts", [])
                     logger.info(f"[pixiv:client] (dict) illusts count={len(illusts)}")
@@ -419,7 +444,13 @@ class PixivClient:
                     return []
 
                 if not illusts:
-                    logger.warning(f"[pixiv:client] illusts 为空列表")
+                    if page == 1:
+                        logger.warning(
+                            f"[pixiv:client] ⚠️ 首页无结果: tag='{tag}' → "
+                            f"该标签在 Pixiv 可能不存在或 API 认证已失效"
+                        )
+                    else:
+                        logger.debug(f"[pixiv:client] 第{page}页无结果: tag='{tag}'")
                     return []
 
                 # 转换结果 + 质量过滤 + 标签黑名单
@@ -484,6 +515,8 @@ class PixivClient:
         """
         if max_pages_per_tag <= 0:
             max_pages_per_tag = self._config.get("search_max_pages", 10)
+
+        empty_tag_count = 0  # 连续首页为空的标签计数
         for tag in tags:
             logger.info(f"[pixiv:client] 尝试标签: '{tag}'")
             result = await self.find_fresh_illust(
@@ -496,7 +529,16 @@ class PixivClient:
             if result is not None:
                 logger.info(f"[pixiv:client] ✅ 标签 '{tag}' 找到作品: {result.illust_id}")
                 return result
+            empty_tag_count += 1
             logger.debug(f"[pixiv:client] 标签 '{tag}' 未找到新鲜作品，尝试下一个...")
+
+            # 连续多个标签首页均为空 → 大概率是 token 过期
+            if empty_tag_count >= 3:
+                logger.error(
+                    f"[pixiv:client] 🔴 连续 {empty_tag_count} 个标签首页无结果！"
+                    f" 极可能是 Access Token 已失效（由 Refresh Token 换取的短期凭证），"
+                    f"请在 WebUI 插件设置中重新填写 refresh_token"
+                )
         return None
 
     # ------------------------------------------------------------------
@@ -640,8 +682,14 @@ class PixivClient:
 
         # 第一轮: 质量过滤 → 收集全部新鲜作品入池
         fresh_pool: list[IllustInfo] = []
+        first_page_empty = False
         for page in range(1, max_pages + 1):
             results = await self.search_by_tag(tag, page=page, r18_mode=r18_mode)
+            if page == 1 and not results:
+                first_page_empty = True
+                # 首页空 → 该标签在 Pixiv 不存在，跳过后续翻页
+                logger.info(f"[pixiv:client] 标签'{tag}' 首页无结果，跳过翻页")
+                break
             for info in results:
                 if not dedup_mgr.is_duplicate(info.illust_id, session_id):
                     fresh_pool.append(info)
@@ -657,6 +705,11 @@ class PixivClient:
             return picked
 
         # 回退: 无结果 → 关闭质量过滤再搜
+        # 但如果首页本就为空（标签不存在），跳过回退
+        if first_page_empty:
+            logger.warning(f"[pixiv:client] 标签'{tag}' 在 Pixiv 无结果，跳过回退")
+            return None
+
         if min_bookmarks > 0:
             logger.info(f"[pixiv:client] 标签'{tag}' 高质量无结果，回退找最佳...")
             best, best_bm = None, -1
@@ -709,6 +762,54 @@ class PixivClient:
                 "未登录 Pixiv。请先配置 pixiv_refresh_token。\n"
                 "使用指令: /pixiv config set pixiv_refresh_token <your_token>"
             )
+
+    # ------------------------------------------------------------------
+    # 后台 token 自动刷新
+    # ------------------------------------------------------------------
+
+    def _start_auto_refresh(self) -> None:
+        """启动后台 token 自动刷新任务（幂等：已存在则跳过）。"""
+        if self._auto_refresh_task and not self._auto_refresh_task.done():
+            return
+        self._auto_refresh_task = asyncio.create_task(self._auto_refresh_loop())
+        logger.debug(
+            f"[pixiv:client] 后台 token 自动刷新已启动 "
+            f"(每 {self._AUTO_REFRESH_INTERVAL}s)"
+        )
+
+    def _cancel_auto_refresh(self) -> None:
+        """取消后台 token 自动刷新任务。"""
+        if self._auto_refresh_task and not self._auto_refresh_task.done():
+            self._auto_refresh_task.cancel()
+            logger.debug("[pixiv:client] 后台 token 自动刷新已取消")
+        self._auto_refresh_task = None
+
+    async def _auto_refresh_loop(self) -> None:
+        """
+        后台循环：每隔 _AUTO_REFRESH_INTERVAL 秒用 refresh_token 重新认证。
+
+        Pixiv Access Token（由用户配置的 Refresh Token 换取）有效期约 1 小时，过期后搜索 API 会静默返回空列表。
+        提前定时刷新可避免用户突然搜不到图的"幽灵故障"。
+        """
+        while self._is_logged_in:
+            await asyncio.sleep(self._AUTO_REFRESH_INTERVAL)
+            if not self._is_logged_in:
+                break
+            token = self._config.get("pixiv_refresh_token", "")
+            if not token:
+                logger.warning("[pixiv:client] ⚠️ 未配置 refresh_token，跳过自动刷新")
+                continue
+            try:
+                # start_refresh_loop=False 避免自己递归调用自己
+                await self.login(token, start_refresh_loop=False)
+                logger.info("[pixiv:client] 🔄 token 自动刷新成功")
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(
+                    f"[pixiv:client] ⚠️ token 自动刷新失败（将在 "
+                    f"{self._AUTO_REFRESH_INTERVAL}s 后重试）: {e}"
+                )
 
     async def _rate_limit_wait(self) -> None:
         """

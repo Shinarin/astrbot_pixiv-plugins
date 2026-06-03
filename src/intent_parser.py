@@ -394,8 +394,8 @@ class IntentParser:
         """
         provider_id = self._config.get("llm_provider_id", "")
 
+        # ---- 优先使用插件专用 LLM ----
         if provider_id and self._context:
-            # 使用插件专用 LLM
             try:
                 resp = await self._context.llm_generate(
                     chat_provider_id=provider_id,
@@ -409,9 +409,20 @@ class IntentParser:
                     f"回退到默认 LLM"
                 )
 
-        # 使用默认 LLM（通过 event，如果有的话 — 这里无法获取 event）
-        # 如果没有 context 和 event，返回 None
-        logger.debug("[pixiv:intent] 无法调用 LLM（无 provider_id 且无 context）")
+        # ---- 回退: 使用 AstrBot 默认 LLM ----
+        if self._context:
+            try:
+                resp = await self._context.llm_generate(
+                    prompt=prompt,
+                    system_prompt=system_prompt,
+                )
+                return resp.completion_text
+            except Exception as e:
+                logger.warning(
+                    f"[pixiv:intent] 默认 LLM 调用失败: {e}"
+                )
+
+        logger.debug("[pixiv:intent] LLM 不可用（无 context）")
         return None
 
     # ==================================================================

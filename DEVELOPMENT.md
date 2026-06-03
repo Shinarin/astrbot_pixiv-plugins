@@ -162,7 +162,7 @@ find_fresh_illust(tag, session_id)  ← 遍历 1~max_pages 页
 | 模块 | 文件 | 核心类 | 职责 |
 |------|------|--------|------|
 | **入口** | `main.py` | `AstrBotPixivPlugin` | 命令注册、消息拦截、流程编排 |
-| **Pixiv** | `src/pixiv_client.py` | `PixivClient` | API 封装、认证、下载、加权随机选图、标签黑名单 |
+| **Pixiv** | `src/pixiv_client.py` | `PixivClient` | API 封装、认证、下载、加权随机选图、标签黑名单、🔁 token 自动刷新 |
 | **意图** | `src/intent_parser.py` | `IntentParser` | LLM 分类、反问生成、关键词匹配 |
 | **去重** | `src/dedup_manager.py` | `DedupManager` | SQLite 记录、重复检查 |
 | **配置** | `src/config_manager.py` | `ConfigManager` | 配置读写、持久化 |
@@ -197,17 +197,31 @@ find_fresh_illust(tag, session_id)  ← 遍历 1~max_pages 页
 
 ### 已知限制
 
-1. **LLM 调用依赖 AstrBot 环境**: `intent_parser.py` 中的 LLM 分类需要 AstrBot 的 `event.request_llm()` 可用
+1. **LLM 调用依赖 AstrBot 环境**: `intent_parser.py` 通过 `context.llm_generate()` 调用 LLM（优先专用 provider，自动回退默认），无需 event
 2. **Pixiv API 稳定性**: 依赖 pixivpy3 和非官方 API，可能因 Pixiv 更新而失效
 3. **无图片缓存**: 每次从 Pixiv CDN 实时获取，无本地缓存
 4. **配置存储**: 优先使用 AstrBot 内置配置，回退到本地 JSON
 5. **热度排序需 Premium**: `popular_desc` 排序需要 Pixiv Premium，否则自动回退为时间排序
+
+### Token 自动刷新
+
+Pixiv 的 Access Token（由用户配置的 Refresh Token 换取）有效期约 1 小时，过期后搜索 API 会**静默返回空列表**（不报错）。
+插件在 `PixivClient.login()` 成功后启动后台 `_auto_refresh_loop()`，每 50 分钟用 refresh_token 重新认证，避免"幽灵故障"。
+
+配套防御措施：
+- `search_by_tag` 检测 API 返回的 `error` 字段（对象和字典两种类型均覆盖）
+- `find_fresh_illust` 首页空 → 立即跳过该标签翻页，不浪费后续 API 调用
+- `search_by_tags` 连续 ≥3 个标签首页全空 → 红色告警"极可能是 token 过期"
+- `_call_llm` 专用 LLM 不可用时自动回退到 AstrBot 默认 LLM（之前无此回退）
 
 ### 待扩展功能
 
 - [x] 多图智能发送（LLM 识别数量）
 - [x] 加权随机选图（去重后从新鲜池随机）
 - [x] 标签黑名单
+- [x] Token 自动刷新 + 过期告警
+- [x] 首页空跳过翻页优化
+- [x] LLM 调用双回退（专用→默认→关键词）
 - [ ] 画师搜索
 - [ ] 排行榜浏览
 - [ ] WebUI 管理面板
