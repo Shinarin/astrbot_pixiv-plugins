@@ -1,0 +1,139 @@
+{
+  "pixiv_refresh_token": {
+    "type": "string",
+    "description": "Pixiv Refresh Token",
+    "hint": "获取方式：登录 pixiv.net 后，使用浏览器开发者工具 (F12 → Application → Cookies) 或第三方工具提取 refresh_token。插件重启后自动重新登录。",
+    "default": ""
+  },
+  "r18_mode": {
+    "type": "string",
+    "description": "R18 内容偏好",
+    "default": "safe",
+    "options": ["safe", "off", "r18_only"],
+    "labels": ["过滤 R18（只看全年龄）", "关闭过滤（显示全部）", "只看 R18"],
+    "hint": "选择 R18 内容的显示策略。"
+  },
+  "r18_admin_id": {
+    "type": "string",
+    "description": "R18 指令管理员 ID",
+    "default": "",
+    "hint": "只有此 ID 的用户可以通过 /pixiv r18 切换 R18 模式。留空则所有人可切换。获取方式：聊天中发送 /sid 查看你的用户 ID。"
+  },
+  "tag_blacklist": {
+    "type": "string",
+    "description": "标签黑名单",
+    "default": "futa",
+    "hint": "逗号分隔的标签列表，含这些标签的作品将不发送。默认屏蔽 futa（扶他）。"
+  },
+  "global_dedup_limit": {
+    "type": "int",
+    "description": "全局去重数量上限",
+    "default": 100,
+    "hint": "记录最近 N 张已发送图片，跨会话生效。超出上限自动清理旧记录"
+  },
+  "session_dedup_limit": {
+    "type": "int",
+    "description": "单会话去重数量上限",
+    "default": 20,
+    "hint": "每个会话（群聊/私聊）独立记录最近 N 张已发送图片"
+  },
+  "search_max_results": {
+    "type": "int",
+    "description": "每次搜索最大返回数",
+    "default": 10,
+    "hint": "按标签搜索时每次最多返回多少结果，范围建议 5-30"
+  },
+  "max_retry_count": {
+    "type": "int",
+    "description": "API 重试次数",
+    "default": 3,
+    "hint": "Pixiv API 调用失败时的最大重试次数"
+  },
+  "llm_provider_id": {
+    "type": "string",
+    "description": "插件专用 LLM 提供商",
+    "default": "",
+    "hint": "用于意图识别和标签富化的 LLM。留空则使用 AstrBot 默认 LLM。",
+    "_special": "select_provider"
+  },
+  "tag_enrichment_enabled": {
+    "type": "bool",
+    "description": "启用 LLM 标签富化",
+    "default": true,
+    "hint": "将用户的中文描述转为 Pixiv 常用标签（日文/英文），大幅提升搜索结果质量。关闭则直接使用原文搜索。"
+  },
+  "min_bookmarks": {
+    "type": "int",
+    "description": "最低收藏数阈值",
+    "default": 50,
+    "hint": "过滤收藏数低于此值的插画，提升结果质量。设为 0 则不过滤。"
+  },
+  "humanized_reply_enabled": {
+    "type": "bool",
+    "description": "拟人化搜索回复",
+    "default": true,
+    "hint": "开启后，搜索过程中的提示信息会由 LLM 根据上下文生成更自然的拟人化回复，而非显示技术参数。"
+  },
+  "show_image_info": {
+    "type": "object",
+    "description": "图片信息展示",
+    "hint": "控制发送图片时附带的信息。全部关闭则只发图片不附带任何文字。",
+    "items": {
+      "show_title": {
+        "type": "bool",
+        "description": "作品标题",
+        "default": true
+      },
+      "show_author": {
+        "type": "bool",
+        "description": "作者名",
+        "default": true
+      },
+      "show_bookmarks": {
+        "type": "bool",
+        "description": "收藏数",
+        "default": true
+      },
+      "show_tags": {
+        "type": "bool",
+        "description": "标签",
+        "default": true
+      },
+      "show_link": {
+        "type": "bool",
+        "description": "作品链接",
+        "default": true
+      }
+    }
+  },
+  "image_quality": {
+    "type": "string",
+    "description": "图片质量",
+    "default": "large",
+    "options": ["original", "large", "medium"],
+    "labels": ["原图（文件较大）", "大图（推荐）", "中等（省流量）"],
+    "hint": "发送图片的画质。原图可能较大导致发送缓慢，大图是官方压缩版。"
+  },
+  "max_images_per_request": {
+    "type": "int",
+    "description": "单次最多发送图片数",
+    "default": 3,
+    "options": [1, 2, 3, 4, 5],
+    "hint": "用户说'来多张'时发送此数量的图片，也是单次请求的上限。"
+  },
+  "search_sort": {
+    "type": "string",
+    "description": "搜索结果排序",
+    "default": "popular_desc",
+    "options": ["popular_desc", "date_desc"],
+    "labels": ["按热度排序（收藏从高到低）", "按时间排序（最新优先）"],
+    "hint": "按热度排序首页即高质量作品。"
+  },
+  "search_max_pages": {
+    "type": "int",
+    "description": "搜索翻页数",
+    "default": 10,
+    "options": [3, 5, 10, 15, 20],
+    "hint": "每个标签最多翻多少页找图。加大可提升命中率，但搜索变慢。"
+  }
+}
