@@ -11,7 +11,7 @@ version: 1.0.0
 author: astrbot_pixiv-plugins
 
 # 插件仓库地址（可选，用于后续自动更新）
-repo: https://github.com/yourname/astrbot_pixiv-plugins
+repo: https://github.com/Shinarin/astrbot_pixiv-plugins
 
 # AstrBot 最低版本要求（v4+ 支持 Star 基类）
 astrbot_version: ">=4.0.0"

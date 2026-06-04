@@ -229,7 +229,7 @@ class AstrBotPixivPlugin(Star):
     # ==================================================================
 
     @filter.command_group("pixiv")
-    def pixiv_group(self):
+    async def pixiv_group(self):
         pass
 
     # ------------------------------------------------------------------
@@ -579,6 +579,9 @@ class AstrBotPixivPlugin(Star):
             # 注入当前 AstrBot 人格提示词，让回复带有人格风味
             await self._inject_persona(event)
             reply = await self.intent_parser.generate_search_reply(tag, enriched_tags)
+            # 清洗 LLM 可能生成的 HTML 实体（如 &happy&）
+            import html as _html
+            reply = _html.unescape(reply)
             # 如果 LLM 返回了数量信息，保留它
             if "张" not in reply and count > 1:
                 reply = hint
@@ -622,10 +625,7 @@ class AstrBotPixivPlugin(Star):
         self, event: AstrMessageEvent, info,
         session_id: str, index: int = 1, total: int = 1,
     ):
-        """
-        发送一个作品的所有图片。单图直接发；多图按 max_pages_per_illust 限制。
-        支持定时撤回和视觉模型内容审核。
-        """
+        """发送作品图片，支持定时撤回和内容审核。"""
         quality = self.config_mgr.get("image_quality", "large")
         info_cfg = self.config_mgr.get("show_image_info", {})
         max_pages = self.config_mgr.get("max_pages_per_illust", 3)
@@ -635,14 +635,11 @@ class AstrBotPixivPlugin(Star):
         if info.is_multi_page:
             page_urls = info.get_page_urls_for_quality(quality, max_pages)
             total_pages = info.page_count
-
             for pi, page_url in enumerate(page_urls):
                 page_bytes = await self.pixiv_client.download_image(page_url)
                 if page_bytes is None:
                     continue
                 img_path = self._save_temp_image(page_bytes, f"{info.illust_id}_p{pi+1}")
-                result = event.make_result()
-                result.file_image(img_path)
                 page_label = f"({pi+1}/{min(total_pages, max_pages)})"
                 if total > 1:
                     page_label = f"[{index}/{total}] {page_label}"
@@ -650,18 +647,24 @@ class AstrBotPixivPlugin(Star):
                 txt = info.to_message_text(info_cfg)
                 if txt:
                     msg_parts.append(txt)
-                result.message("\n".join(msg_parts))
-                yield result
+                text = "\n".join(msg_parts)
 
-                # 定时撤回 + 内容审核
-                self._schedule_recall(event, result, recall_sec)
+                msg_id = await self._send_image(event, img_path, text)
+                if msg_id:
+                    self._schedule_recall(event, msg_id, recall_sec)
+                else:
+                    # 底层发送失败，回退到标准 yield 方式
+                    result = event.make_result()
+                    result.file_image(img_path)
+                    if text:
+                        result.message(text)
+                    yield result
                 if moderation_on:
                     apology = await self._check_and_moderate(event, page_bytes, info, img_path)
                     if apology:
                         yield event.plain_result(apology)
 
             self.dedup_mgr.mark_sent(info.illust_id, session_id)
-
             if total_pages > max_pages:
                 yield event.plain_result(
                     f"📄 该作品共 {total_pages} 页，已发送前 {max_pages} 页。\n"
@@ -676,52 +679,99 @@ class AstrBotPixivPlugin(Star):
 
             self.dedup_mgr.mark_sent(info.illust_id, session_id)
             img_path = self._save_temp_image(image_bytes, info.illust_id)
-            result = event.make_result()
-            result.file_image(img_path)
             msg = info.to_message_text(info_cfg)
             if total > 1 and msg:
                 msg = f"({index}/{total})\n{msg}"
-            if msg:
-                result.message(msg)
-            yield result
+            text = msg or ""
 
-            # 定时撤回 + 内容审核
-            self._schedule_recall(event, result, recall_sec)
+            msg_id = await self._send_image(event, img_path, text)
+            if msg_id:
+                self._schedule_recall(event, msg_id, recall_sec)
+            else:
+                # 底层发送失败，回退到标准 yield 方式
+                result = event.make_result()
+                result.file_image(img_path)
+                if text:
+                    result.message(text)
+                yield result
             if moderation_on:
                 apology = await self._check_and_moderate(event, image_bytes, info, img_path)
                 if apology:
                     yield event.plain_result(apology)
 
     # ==================================================================
+    # 图片发送（低级 API，返回 message_id 用于撤回）
+    # ==================================================================
+
+    async def _send_image(self, event: AstrMessageEvent, img_path: str, text: str) -> int | None:
+        """
+        通过 QQ 底层 API 发送图片+文字，返回 message_id。
+        失败时回退到 yield 方式（无 message_id）。
+        """
+        try:
+            import base64
+            with open(img_path, "rb") as f:
+                b64 = base64.b64encode(f.read()).decode("utf-8")
+            cq_msg = f"[CQ:image,file=base64://{b64}]"
+            if text:
+                cq_msg += f"\n{text}"
+
+            bot = getattr(event, 'bot', None)
+            if bot and hasattr(bot, 'call_action'):
+                if event.is_private_chat():
+                    resp = await bot.call_action('send_private_msg',
+                        user_id=int(event.get_sender_id()),
+                        message=cq_msg,
+                    )
+                else:
+                    resp = await bot.call_action('send_group_msg',
+                        group_id=int(event.get_group_id()),
+                        message=cq_msg,
+                    )
+                logger.info(f"[pixiv] 📤 send_msg 响应: type={type(resp).__name__}, "
+                            f"keys={list(resp.keys()) if isinstance(resp, dict) else 'N/A'}")
+                # 兼容不同 OneBot 实现的 message_id 字段名
+                msg_id = (resp.get('message_id') or resp.get('msg_id') or
+                          resp.get('real_id') or resp.get('message_seq')) if isinstance(resp, dict) else None
+                if msg_id:
+                    logger.info(f"[pixiv] ✅ 获取 message_id={msg_id}，"
+                                f"将在 {self.config_mgr.get('recall_after_seconds', 60)}s 后撤回")
+                    return int(msg_id)
+                else:
+                    logger.warning(f"[pixiv] ⚠️ send_msg 响应中无 message_id: {str(resp)[:200]}")
+        except Exception as e:
+            logger.warning(f"[pixiv] ⚠️ 底层发送异常: {e}")
+
+        # 回退: 返回 None（无法撤回，但图片仍会通过后续流程发送）
+        return None
+
+    # ==================================================================
     # 定时撤回
     # ==================================================================
 
-    def _schedule_recall(self, event: AstrMessageEvent, result, seconds: int) -> None:
-        """调度定时撤回任务。seconds=0 则跳过。"""
-        if seconds <= 0:
+    def _schedule_recall(self, event: AstrMessageEvent, message_id: int, seconds: int) -> None:
+        """调度定时撤回。seconds=0 或缺 message_id 则跳过。"""
+        if seconds <= 0 or not message_id:
             return
-        asyncio.create_task(self._recall_after(event, result, seconds))
+        asyncio.create_task(self._recall_after(event, message_id, seconds))
 
-    async def _recall_after(self, event: AstrMessageEvent, result, seconds: int) -> None:
-        """等待指定秒数后尝试撤回消息。"""
+    async def _recall_after(self, event: AstrMessageEvent, message_id: int, seconds: int) -> None:
+        """等待后通过 OneBot delete_msg API 撤回消息。"""
         await asyncio.sleep(seconds)
         try:
-            # 尝试多种撤回 API（兼容不同 AstrBot 版本和平台）
-            if hasattr(event, 'recall_message'):
-                await event.recall_message(result)
-            elif hasattr(event, 'delete_message'):
-                await event.delete_message(result)
-            elif hasattr(event, 'get_platform'):
-                platform = event.get_platform()
-                if hasattr(platform, 'delete_msg'):
-                    # 尝试获取 message_id
-                    msg_id = getattr(result, 'message_id', None) or getattr(result, 'msg_id', None)
-                    if msg_id:
-                        await platform.delete_msg(message_id=msg_id)
+            bot = getattr(event, 'bot', None)
+            if bot and hasattr(bot, 'delete_msg'):
+                logger.info(f"[pixiv] 🔄 正在撤回 message_id={message_id}...")
+                resp = await bot.delete_msg(message_id=message_id)
+                logger.info(f"[pixiv] delete_msg 返回: {resp}")
+            elif bot and hasattr(bot, 'call_action'):
+                logger.info(f"[pixiv] 🔄 通过 call_action 撤回 message_id={message_id}")
+                resp = await bot.call_action('delete_msg', message_id=message_id)
+                logger.info(f"[pixiv] call_action delete_msg 返回: {resp}")
             else:
-                logger.debug("[pixiv] 撤回 API 不可用，跳过定时撤回")
+                logger.warning(f"[pixiv] ⚠️ 撤回失败：event.bot 不可用")
         except Exception as e:
-            logger.debug(f"[pixiv] 撤回消息失败（非关键）: {e}")
+            logger.warning(f"[pixiv] ⚠️ 撤回异常: {type(e).__name__}: {e}")
 
     # ==================================================================
     # 图片内容审核
@@ -796,21 +846,32 @@ class AstrBotPixivPlugin(Star):
 
             # 调用视觉模型
             provider_id = self.config_mgr.get("content_moderation_provider", "")
+            model_name = self._get_provider_model_name(provider_id) or provider_id or "默认视觉模型"
+            logger.info(f"[pixiv] 内容审核中... 模型: {model_name}")
             prompt = (
-                "请对这张图片进行内容安全审核，只关注色情/暴露程度。"
-                "给出一个 0~10 的整数评分：0=完全正常，5=有些暴露，10=极端色情。"
-                "只回复一个数字，不要解释。"
+                "你是内容安全审核员。请对这张图片进行色情/暴露程度评估，给出 0~10 的整数评分。\n\n"
+                "## 评分标准\n"
+                "- 0~2: 完全正常（普通插图、风景、人物着装正常）\n"
+                "- 3~5: 轻度暴露（泳装、内衣、性感姿势但无性暗示）\n"
+                "- 6~8: 明显暴露（裸体、性挑逗姿势、暗示性场景）\n"
+                "- 9~10: 极端色情（直接性行为、露骨性器官特写）\n\n"
+                "## 注意\n"
+                "- 仅凭大胸部、紧身衣不构成色情，需看整体暴露程度和性暗示\n"
+                "- R-18 标签不一定代表极端色情，请根据实际画面判断\n"
+                "- 只回复一个数字，不要解释"
             )
 
             if provider_id and self.context:
                 resp = await self.context.llm_generate(
                     chat_provider_id=provider_id,
                     prompt=prompt,
+                    system_prompt="你是专业的内容安全审核员。你的任务是对图片进行色情/暴露程度评估。只回复数字，不带任何解释。",
                     image=image_data,
                 )
             elif self.context:
                 resp = await self.context.llm_generate(
                     prompt=prompt,
+                    system_prompt="你是专业的内容安全审核员。你的任务是对图片进行色情/暴露程度评估。只回复数字，不带任何解释。",
                     image=image_data,
                 )
             else:
@@ -855,6 +916,21 @@ class AstrBotPixivPlugin(Star):
             return 'image' in (inputs or [])
         except Exception:
             return True  # 无法判断 → 假定支持
+
+    def _get_provider_model_name(self, provider_id: str) -> str:
+        """从 provider_id 获取模型名称，用于日志显示。"""
+        try:
+            manager = getattr(self.context, 'provider_manager', None)
+            if manager:
+                inst = getattr(manager, 'inst_map', {}).get(provider_id)
+                if inst:
+                    meta = getattr(inst, 'meta', None)
+                    if meta:
+                        m = meta() if callable(meta) else meta
+                        return getattr(m, 'model', '') or provider_id
+        except Exception:
+            pass
+        return provider_id
 
     async def _generate_moderation_apology(self, event: AstrMessageEvent, info) -> str:
         """生成内容审核触发的道歉回复（带人格预设）。"""
