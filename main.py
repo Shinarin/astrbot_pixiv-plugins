@@ -665,8 +665,9 @@ class AstrBotPixivPlugin(Star):
                     if text:
                         result.message(text)
                     yield result
+                self._cleanup_temp_file(img_path)
                 if moderation_on:
-                    apology = await self._check_and_moderate(event, page_bytes, info, img_path)
+                    apology = await self._check_and_moderate(event, page_bytes, info, img_path, msg_id)
                     if apology:
                         yield event.plain_result(apology)
 
@@ -699,8 +700,9 @@ class AstrBotPixivPlugin(Star):
                 if text:
                     result.message(text)
                 yield result
+            self._cleanup_temp_file(img_path)
             if moderation_on:
-                apology = await self._check_and_moderate(event, image_bytes, info, img_path)
+                apology = await self._check_and_moderate(event, image_bytes, info, img_path, msg_id)
                 if apology:
                     yield event.plain_result(apology)
 
@@ -786,9 +788,13 @@ class AstrBotPixivPlugin(Star):
 
     async def _check_and_moderate(
         self, event: AstrMessageEvent, image_bytes: bytes,
-        info, img_path: str,
+        info, img_path: str, message_id: int | None = None,
     ) -> str | None:
-        """用视觉模型审核图片，评分超过阈值则撤回并返回道歉消息。返回 None 表示无需处理。"""
+        """用视觉模型审核图片，评分超过阈值则撤回并返回道歉消息。返回 None 表示无需处理。
+
+        Args:
+            message_id: 已发送图片的消息 ID，用于撤回。为 None 时无法撤回（如 yield 回退路径）。
+        """
         try:
             score = await self._moderate_image(image_bytes)
             if score is None:
@@ -801,8 +807,14 @@ class AstrBotPixivPlugin(Star):
             )
 
             if score > threshold:
-                # 撤回图片
-                await self._recall_after(event, None, 1)
+                # 撤回图片（仅当有 message_id 时才能撤回）
+                if message_id:
+                    await self._recall_after(event, message_id, 1)
+                else:
+                    logger.warning(
+                        f"[pixiv] 内容审核需撤回但无 message_id: "
+                        f"illust_id={info.illust_id}"
+                    )
                 # 生成人格预设的道歉
                 apology = await self._generate_moderation_apology(event, info)
                 return apology
@@ -876,7 +888,11 @@ class AstrBotPixivPlugin(Star):
                     image=image_data,
                 )
             elif self.context:
+                # 获取默认 provider ID（AstrBot v4.5+ 要求必传 chat_provider_id）
+                providers = self.context.get_all_providers()
+                default_id = providers[0].meta().id if providers else ""
                 resp = await self.context.llm_generate(
+                    chat_provider_id=default_id,
                     prompt=prompt,
                     system_prompt="你是专业的内容安全审核员。你的任务是对图片进行色情/暴露程度评估。只回复数字，不带任何解释。",
                     image=image_data,
@@ -1021,6 +1037,14 @@ class AstrBotPixivPlugin(Star):
         tmp.write(image_bytes)
         tmp.close()
         return tmp.name
+
+    @staticmethod
+    def _cleanup_temp_file(path: str) -> None:
+        """删除临时图片文件，静默忽略错误（文件可能已被系统回收）。"""
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
 
     # ==================================================================
     # 错误处理

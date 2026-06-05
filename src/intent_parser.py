@@ -412,7 +412,11 @@ class IntentParser:
         # ---- 回退: 使用 AstrBot 默认 LLM ----
         if self._context:
             try:
+                # 获取默认 provider ID（AstrBot v4.5+ 要求必传 chat_provider_id）
+                providers = self._context.get_all_providers()
+                default_id = providers[0].meta().id if providers else ""
                 resp = await self._context.llm_generate(
+                    chat_provider_id=default_id,
                     prompt=prompt,
                     system_prompt=system_prompt,
                 )
@@ -517,17 +521,23 @@ class IntentParser:
     @staticmethod
     def _extract_tag(message: str) -> Optional[str]:
         """从自然语言中提取搜索标签。"""
+        # 噪声词按长度降序排列，避免短词先匹配破坏长词
         noise = [
-            "帮我", "找", "搜索", "搜", "来张", "来一张", "给张",
-            "有没有", "有吗", "看看", "我想看", "想要", "求",
-            "pixiv的", "Pixiv的", "pixiv", "Pixiv",
-            "图片", "图", "插画", "的图", "的图片",
-            "一张", "一个", "一些", "的", "吗",
+            "pixiv的", "Pixiv的", "的图片", "来一张",
+            "有没有", "pixiv", "Pixiv", "插画",
+            "我想看", "一张", "一个", "一些",
+            "来张", "给张", "的图", "图片",
+            "搜索", "帮我", "看看", "想要",
+            "有吗", "找", "搜", "图", "求",
         ]
         tag = message
         for w in noise:
             tag = tag.replace(w, "")
         tag = re.sub(r'[，。！？、；：""''（）【】《》\s]+', ' ', tag).strip()
+        # 过滤残留的短噪声字（"的"、"吗"等），但保留有意义的单字标签
+        short_noise = {"的", "吗", "呢", "吧", "啊", "呀"}
+        words = [w for w in tag.split() if w not in short_noise]
+        tag = " ".join(words)
         return tag if len(tag) >= 1 else None
 
     @staticmethod

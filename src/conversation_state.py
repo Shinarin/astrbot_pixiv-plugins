@@ -87,6 +87,9 @@ class ConversationStateManager:
         """
         检查指定会话是否处于"等待用户澄清"状态。
 
+        本方法为只读查询，超时清理由 cleanup_expired() 统一负责，
+        避免在查询路径中无锁修改共享状态。
+
         Args:
             session_id: 会话 ID。
 
@@ -97,9 +100,8 @@ class ConversationStateManager:
         if state is None:
             return False
 
-        # 检查超时
+        # 检查超时（仅判断，不修改——由 cleanup_expired 统一清理）
         if self._is_timed_out(state):
-            self._sessions.pop(session_id, None)
             return False
 
         return state.state == ConversationState.WAITING_CLARIFICATION

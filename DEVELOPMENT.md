@@ -12,8 +12,10 @@ astrbot_plugin_search_pixiv_pic/
 ├── main.py                   # 🔴 插件入口 — Star 类 + 所有 handler
 ├── metadata.yaml             # 🟡 AstrBot 插件元信息
 ├── requirements.txt          # 🟡 Python 依赖
+├── _conf_schema.json         # 🟡 WebUI 配置表单定义（20+ 配置项）
 ├── README.md                 # 🟢 用户文档
 ├── DEVELOPMENT.md            # 🟢 本文档
+├── CHANGELOG.md              # 🟢 更新日志
 └── src/                      # 🔴 核心逻辑
     ├── __init__.py            #   包初始化
     ├── pixiv_client.py        #   Pixiv API 封装
@@ -48,9 +50,11 @@ astrbot_plugin_search_pixiv_pic/
               ┌──────▼────────────▼──────┐              │
               │   intent_parser.py       │              │
               │   ┌──────────────────┐   │              │
-              │   │ 快速关键词匹配   │   │              │
-              │   │       ↓          │   │              │
               │   │ LLM 深度分类     │   │              │
+              │   │   (优先通路)     │   │              │
+              │   │       ↓          │   │              │
+              │   │ 关键词回退匹配   │   │              │
+              │   │   (降级方案)     │   │              │
               │   └──────────────────┘   │              │
               └──────────┬───────────────┘              │
                          │                              │
@@ -90,7 +94,7 @@ find_fresh_illust(tag, session_id)  ← 遍历 1~max_pages 页
   │   for page in 1..max_pages:
   │       results = search_by_tag(tag, page)
   │       for info in results:
-  │           if not dedup.is_duplicate(info.id, session_id):
+  │           if not dedup.is_duplicate(info.illust_id, session_id):
   │               fresh_pool.append(info)     ← 收集全部未发送作品
   │
   ▼
@@ -168,9 +172,21 @@ find_fresh_illust(tag, session_id)  ← 遍历 1~max_pages 页
 | **入口** | `main.py` | `AstrBotPixivPlugin` | 命令注册、消息拦截、流程编排 |
 | **Pixiv** | `src/pixiv_client.py` | `PixivClient` | API 封装、认证、下载、加权随机选图、标签黑名单、🔁 token 自动刷新 |
 | **意图** | `src/intent_parser.py` | `IntentParser` | LLM 分类、反问生成、关键词匹配 |
-| **去重** | `src/dedup_manager.py` | `DedupManager` | SQLite 记录、重复检查 |
+| **去重** | `src/dedup_manager.py` | `DedupManager` | SQLite 记录、重复检查、自动重连 |
 | **配置** | `src/config_manager.py` | `ConfigManager` | 配置读写、持久化 |
 | **状态** | `src/conversation_state.py` | `ConversationStateManager` | 对话状态、超时清理 |
+
+### 核心方法速查
+
+| 方法 | 所在文件 | 说明 |
+|------|---------|------|
+| `_search_and_send_images()` | `main.py` | 标签搜索+多图发送的核心编排方法，串联富化→搜索→下载→发送→撤回→审核 |
+| `_send_illust_images()` | `main.py` | 发送单个作品的图片（支持多页漫画/图集），处理定时撤回和内容审核 |
+| `_send_image()` | `main.py` | 底层 OneBot API 发送图片+文字，返回 `message_id` 供撤回/审核使用 |
+| `_cleanup_temp_file()` | `main.py` | 发送完成后删除临时图片文件 |
+| `search_by_tags()` | `pixiv_client.py` | 多标签依次搜索，找到第一个匹配的新鲜作品即返回 |
+| `find_fresh_illust()` | `pixiv_client.py` | 遍历多页收集未发送作品，加权随机选图；高质量无结果时回退关闭收藏数过滤 |
+| `_ensure_connection()` | `dedup_manager.py` | 数据库连接健康检查与自动重连 |
 
 ---
 
@@ -194,7 +210,7 @@ find_fresh_illust(tag, session_id)  ← 遍历 1~max_pages 页
 | Phase 1: 项目骨架 | ✅ 完成 | metadata.yaml, requirements.txt, main.py 骨架 |
 | Phase 2: Pixiv API | ✅ 完成 | pixiv_client.py (search_by_id/tag, download) |
 | Phase 3: 去重管理 | ✅ 完成 | dedup_manager.py (SQLite 会话去重) |
-| Phase 4: 配置管理 | ✅ 完成 | config_manager.py (6 个配置项) |
+│ Phase 4: 配置管理 | ✅ 完成 | config_manager.py (20+ 配置项，WebUI 表单) |
 | Phase 5: 状态机+意图 | ✅ 完成 | conversation_state.py + intent_parser.py |
 | Phase 6: 主逻辑集成 | ✅ 完成 | main.py 完整版 (所有 handler + NL 拦截器) |
 | Phase 7: 测试验证 | ⬜ 待做 | 单元测试 + 集成测试 |
@@ -233,17 +249,18 @@ Pixiv 漫画和插画图集包含多张图片。`IllustInfo` 通过 `page_count`
 
 ### 定时撤回
 
-`_schedule_recall()` 在每张图片 yield 后创建后台 asyncio 任务，等待 `recall_after_seconds` 秒后尝试撤回。撤回 API 兼容多种 AstrBot 版本（`event.recall_message` / `event.delete_message` / `platform.delete_msg`），失败时静默忽略。设为 0 则禁用。
+`_schedule_recall()` 在每张图片发送后创建后台 asyncio 任务，等待 `recall_after_seconds` 秒后尝试撤回。撤回通过 OneBot `bot.delete_msg()` 或 `bot.call_action('delete_msg', ...)` 实现，失败时静默忽略。设为 0 则禁用。
 
 ### 视觉模型内容审核
 
 开启 `content_moderation_enabled` 后，`_check_and_moderate()` 在图片发送后执行：
 1. `_moderate_image()` 用 Pillow 压缩图片到 ~100KB、Base64 编码
-2. 通过 `context.llm_generate(image=...)` 发送给视觉 LLM
+2. 通过 `context.llm_generate(image=...)` 发送给视觉 LLM（优先 `content_moderation_provider`，回退默认 provider）
 3. 解析模型返回的 0~10 评分
-4. 若评分 > `nsfw_threshold`（默认 8），立即撤回并调用 `_generate_moderation_apology()` 生成带人格预设的道歉回复
+4. 若评分 > `nsfw_threshold`（默认 8），通过 `message_id` 撤回图片并调用 `_generate_moderation_apology()` 生成带人格预设的道歉回复
 
 视觉模型可通过 `content_moderation_provider`（`_special: select_provider`）独立选择。
+审核后发送的临时图片文件由 `_cleanup_temp_file()` 自动清理。
 ### 待扩展功能
 
 - [x] 多图智能发送（LLM 识别数量）

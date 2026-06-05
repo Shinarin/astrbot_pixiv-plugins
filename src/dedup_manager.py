@@ -77,12 +77,27 @@ class DedupManager:
         """)
         self._conn.commit()
 
+    def _ensure_connection(self) -> None:
+        """检查并恢复数据库连接（应对连接意外断开）。"""
+        try:
+            self._conn.execute("SELECT 1")
+        except (sqlite3.ProgrammingError, sqlite3.OperationalError):
+            logger.warning("[pixiv:dedup] 数据库连接已断开，尝试重连...")
+            try:
+                self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
+                self._conn.execute("PRAGMA journal_mode=WAL")
+                logger.info("[pixiv:dedup] 数据库重连成功")
+            except Exception as e:
+                logger.error(f"[pixiv:dedup] 数据库重连失败: {e}")
+                raise
+
     # ------------------------------------------------------------------
     # 去重查询
     # ------------------------------------------------------------------
 
     def is_duplicate(self, illust_id: int, session_id: str) -> bool:
         """检查作品是否已在当前会话中发送过。"""
+        self._ensure_connection()
         with self._lock:
             row = self._conn.execute(
                 f"SELECT 1 FROM {self.TABLE_SESSION} WHERE session_id = ? AND illust_id = ?",
@@ -96,6 +111,7 @@ class DedupManager:
 
     def mark_sent(self, illust_id: int, session_id: str) -> None:
         """标记作品已发送。"""
+        self._ensure_connection()
         now = self._now_iso()
         with self._lock:
             self._conn.execute(

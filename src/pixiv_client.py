@@ -845,6 +845,13 @@ class PixivClient:
                         sort=self._config.get("search_sort", "popular_desc"),
                         offset=(page - 1) * 30,
                     )
+                    # 检测 token 过期等 API 错误（与 search_by_tag 保持一致）
+                    if hasattr(result, 'error') and result.error:
+                        logger.error(f"[pixiv:client] 回退搜索 API 错误: {result.error}")
+                        continue
+                    if isinstance(result, dict) and result.get("error"):
+                        logger.error(f"[pixiv:client] 回退搜索 API 错误: {result['error']}")
+                        continue
                     illusts = result.illusts if hasattr(result, 'illusts') else result.get("illusts", []) if isinstance(result, dict) else []
                     for d in illusts[:20]:
                         d = self._normalize_illust(d)

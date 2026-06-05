@@ -1,5 +1,24 @@
 # What's Changed
 
+> 📢 v1.0.2 → v1.0.3
+
+## 🐛 修复
+
+- **修复 `context.llm_generate()` 缺少必传 `chat_provider_id`**：回退路径和审核回退路径通过 `get_all_providers()` 获取默认 provider ID，避免 TypeError
+- **修复内容审核撤回 `message_id=None` 导致撤回失效**：`_check_and_moderate()` 新增 `message_id` 参数，`_send_illust_images()` 传递真实消息 ID，确保审核触发时能正确撤回
+
+## 🔧 优化
+
+- **`conversation_state.is_waiting()` 锁安全**：移除查询路径中的无锁 `pop()` 操作，超时清理由 `cleanup_expired()` 统一负责
+- **`config_manager.get_all()` 深拷贝**：改用 `copy.deepcopy()` 防止嵌套配置对象（如 `show_image_info`）被意外共享修改
+- **`find_fresh_illust()` 回退路径增加 API 错误检测**：与 `search_by_tag()` 保持一致，检测 token 过期等 API 错误字段
+- **`_extract_tag()` 噪声词优化**：按长度降序排列避免短词误伤，新增短噪声字集合精确过滤
+- **临时图片文件自动清理**：新增 `_cleanup_temp_file()`，发送完成后立即删除临时文件，防止磁盘堆积
+- **`DedupManager` 数据库自动重连**：新增 `_ensure_connection()` 健康检查，连接断开时自动恢复
+- **DEVELOPMENT.md 文档完善**：修正架构图（LLM 优先→关键词回退）、补充缺失文件、新增核心方法速查表
+
+---
+
 > 📢 v1.0.1 → v1.0.2
 
 ## 🔧 优化

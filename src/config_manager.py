@@ -14,6 +14,7 @@
 # ============================================================================
 
 from typing import Any
+import copy
 
 # 默认配置值（当 AstrBotConfig 中缺少某键时使用）
 DEFAULT_CONFIG = {
@@ -71,8 +72,8 @@ class ConfigManager:
         self._config[key] = value
 
     def get_all(self) -> dict:
-        """获取所有配置的合并视图。"""
-        result = dict(DEFAULT_CONFIG)
+        """获取所有配置的合并视图（深拷贝，避免嵌套对象被意外修改）。"""
+        result = copy.deepcopy(DEFAULT_CONFIG)
         result.update(self._config)
         return result
 
