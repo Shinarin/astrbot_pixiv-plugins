@@ -1,4 +1,4 @@
-# 🛠️ astrbot_pixiv-plugins 开发文档
+# 🛠️ astrbot_plugin_search_pixiv_pic 开发文档
 
 > 本文档旨在帮助新开发者快速了解项目结构、核心架构和开发约定。
 > 如需更换开发 Agent，请先阅读本文档。
@@ -8,7 +8,7 @@
 ## 📂 项目结构一览
 
 ```
-astrbot_pixiv-plugins/
+astrbot_plugin_search_pixiv_pic/
 ├── main.py                   # 🔴 插件入口 — Star 类 + 所有 handler
 ├── metadata.yaml             # 🟡 AstrBot 插件元信息
 ├── requirements.txt          # 🟡 Python 依赖

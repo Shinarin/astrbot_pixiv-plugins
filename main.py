@@ -1,9 +1,9 @@
 # ============================================================================
-# astrbot_pixiv-plugins — 插件入口 (main.py)
+# astrbot_plugin_search_pixiv_pic — 插件入口 (main.py)
 # ============================================================================
 # Pixiv 图片检索插件，支持指令和自然语言两种交互方式。
 #
-# 设置方式：AstrBot WebUI → 插件管理 → astrbot_pixiv-plugins → 设置
+# 设置方式：AstrBot WebUI → 插件管理 → astrbot_plugin_search_pixiv_pic → 设置
 #   （基于 _conf_schema.json 自动生成设置表单，无需手动输指令配置）
 #
 # 触发条件：私聊直接触发，群聊需 @机器人。
@@ -101,7 +101,7 @@ class AstrBotPixivPlugin(Star):
 
     async def initialize(self) -> None:
         logger.info("=" * 50)
-        logger.info("[pixiv] 🎨 astrbot_pixiv-plugins 正在初始化...")
+        logger.info("[pixiv] 🎨 astrbot_plugin_search_pixiv_pic 正在初始化...")
         logger.info("=" * 50)
 
         from src.config_manager import ConfigManager
@@ -155,7 +155,7 @@ class AstrBotPixivPlugin(Star):
         self._cleanup_task = asyncio.create_task(self._cleanup_loop())
 
         logger.info("[pixiv] ✅ 插件初始化完成！")
-        logger.info("[pixiv] 设置: WebUI → 插件 → astrbot_pixiv-plugins → 设置")
+        logger.info("[pixiv] 设置: WebUI → 插件 → astrbot_plugin_search_pixiv_pic → 设置")
         logger.info("[pixiv] 指令: /pixiv id|tag|r18|help")
         logger.info("=" * 50)
 
@@ -370,7 +370,7 @@ class AstrBotPixivPlugin(Star):
             "  例: `/pixiv r18 off` 关闭过滤\n\n"
             "• `/pixiv help` — 显示本帮助\n\n"
             "**⚙️ 设置方式:**\n"
-            "WebUI → 插件管理 → astrbot_pixiv-plugins → 设置\n"
+            "WebUI → 插件管理 → astrbot_plugin_search_pixiv_pic → 设置\n"
             "包括: Pixiv Token、R18 过滤、去重数量等\n\n"
             "**自然语言:**\n"
             "也可以直接说「找一张猫娘的图」自动搜索\n"
@@ -388,7 +388,7 @@ class AstrBotPixivPlugin(Star):
         all_config = self.config_mgr.get_all()
         lines = [
             "📋 **当前配置（只读）**",
-            "💡 修改设置请前往: WebUI → 插件 → astrbot_pixiv-plugins → 设置",
+            "💡 修改设置请前往: WebUI → 插件 → astrbot_plugin_search_pixiv_pic → 设置",
             "",
         ]
         for k, v in all_config.items():
@@ -1022,7 +1022,7 @@ class AstrBotPixivPlugin(Star):
 
     @filter.on_plugin_error()
     async def on_error(self, event, plugin_name, handler_name, error, traceback_text):
-        if plugin_name != "astrbot_pixiv-plugins":
+        if plugin_name != "astrbot_plugin_search_pixiv_pic":
             return
         logger.error(f"[pixiv] 异常 | handler={handler_name} | error={error}\n{traceback_text}")
         if self.conv_state:

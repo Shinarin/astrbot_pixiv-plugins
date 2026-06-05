@@ -1,17 +1,17 @@
 # ============================================================================
-# astrbot_pixiv-plugins 插件元数据
+# astrbot_plugin_search_pixiv_pic 插件元数据
 # ============================================================================
 # 本文件是 AstrBot 插件系统的必需文件，定义插件的基本信息和兼容性。
 # 更多字段说明: https://astrbot.app/plugin-dev/metadata
 # ============================================================================
 
-name: astrbot_pixiv-plugins
+name: astrbot_plugin_search_pixiv_pic
 desc: "Pixiv 图片检索插件 — 支持按 ID / 标签搜索插画，自然语言意图识别，R18 过滤，智能去重"
 version: 1.0.2
-author: astrbot_pixiv-plugins
+author: Shinarin
 
 # 插件仓库地址（可选，用于后续自动更新）
-repo: https://github.com/Shinarin/astrbot_pixiv-plugins
+repo: https://github.com/Shinarin/astrbot_plugin_search_pixiv_pic
 
 # AstrBot 最低版本要求（v4+ 支持 Star 基类）
 astrbot_version: ">=4.0.0"

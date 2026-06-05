@@ -1,4 +1,4 @@
-# 🎨 astrbot_pixiv-plugins
+# 🎨 astrbot_plugin_search_pixiv_pic
 
 > AstrBot Pixiv 图片检索插件 — 支持指令和自然语言，LLM 驱动的智能搜图
 
@@ -60,7 +60,7 @@
 AstrBot安装目录/
 └── data/
     └── plugins/                       ← 插件根目录
-        └── astrbot_pixiv-plugins/     ← 复制这个文件夹到这里
+        └── astrbot_plugin_search_pixiv_pic/     ← 复制这个文件夹到这里
             ├── main.py                ← 插件入口
             ├── metadata.yaml          ← 插件信息
             ├── _conf_schema.json      ← 设置表单定义
@@ -84,7 +84,7 @@ pip install pixivpy3 httpx Pillow
 
 ## ⚙️ 配置
 
-**WebUI → 插件管理 → astrbot_pixiv-plugins → 设置**
+**WebUI → 插件管理 → astrbot_plugin_search_pixiv_pic → 设置**
 
 ### 必填
 
