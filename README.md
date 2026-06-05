@@ -163,7 +163,6 @@ pip install pixiv-token
 | `search_max_pages` | 下拉 | 10 | 翻页数 |
 | `max_images_per_request` | 下拉 | 3 | 单次最多张数 |
 | `max_pages_per_illust` | 下拉 | 3 | 多图作品最多发送页数 |
-| `global_dedup_limit` | int | 100 | 全局去重数 |
 | `session_dedup_limit` | int | 20 | 会话去重数 |
 | `recall_after_seconds` | 下拉 | 60 | 定时撤回秒数（0=关闭） |
 | `content_moderation_enabled` | bool | ❌ | 启用图片内容审核 |

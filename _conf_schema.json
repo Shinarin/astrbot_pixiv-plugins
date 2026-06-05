@@ -25,12 +25,6 @@
     "default": "futa",
     "hint": "逗号分隔的标签列表，含这些标签的作品将不发送。默认屏蔽 futa（扶他）。"
   },
-  "global_dedup_limit": {
-    "type": "int",
-    "description": "全局去重数量上限",
-    "default": 100,
-    "hint": "记录最近 N 张已发送图片，跨会话生效。超出上限自动清理旧记录"
-  },
   "session_dedup_limit": {
     "type": "int",
     "description": "单会话去重数量上限",

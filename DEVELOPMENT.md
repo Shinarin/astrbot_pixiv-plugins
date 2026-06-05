@@ -71,7 +71,7 @@ astrbot_pixiv-plugins/
                 │                                       │
     ┌───────────▼───────────────┐                      │
     │  dedup_manager.py         │                      │
-    │  全局100 + 会话20 去重    │                      │
+    │  会话独立去重 (默认20)    │                      │
     └───────────┬───────────────┘                      │
                 │                                       │
     ┌───────────▼───────────────┐                      │
@@ -101,6 +101,9 @@ find_fresh_illust(tag, session_id)  ← 遍历 1~max_pages 页
 
 > ⚠️ **架构要点**: 随机必须在去重之后。如果先去重前随机采样，可能抽到的全是已发送作品，
 > 导致"明明 Pixiv 有图却搜不到"。当前设计确保新鲜池 = 全部可用的未发送作品，不会遗漏。
+>
+> ⚠️ **去重时机**: `mark_sent()` 必须在发送成功后调用，不能提前。如果发送失败（网络错误等），
+> 作品不应被标记为已发送，以便下次搜索重试。单图和多图两条路径均遵循此原则。
 
 ---
 
@@ -112,10 +115,11 @@ find_fresh_illust(tag, session_id)  ← 遍历 1~max_pages 页
 用户: /pixiv id 12345678
   → @filter.command_group("pixiv") → cmd_pixiv_id()
   → pixiv_client.search_by_id(12345678)
-  → config_mgr.is_r18_enabled 检查
-  → dedup_mgr.mark_sent()
-  → pixiv_client.download_image()
-  → event.make_result().file_image() 发送
+  → _send_illust_images()
+    → download_image()
+    → _send_image() / fallback yield
+    → _check_and_moderate()（如启用）
+    → dedup_mgr.mark_sent()           ← 发送成功后才标记
 ```
 
 ### 2. 自然语言流程
@@ -189,7 +193,7 @@ find_fresh_illust(tag, session_id)  ← 遍历 1~max_pages 页
 |-------|------|---------|
 | Phase 1: 项目骨架 | ✅ 完成 | metadata.yaml, requirements.txt, main.py 骨架 |
 | Phase 2: Pixiv API | ✅ 完成 | pixiv_client.py (search_by_id/tag, download) |
-| Phase 3: 去重管理 | ✅ 完成 | dedup_manager.py (SQLite 双层去重) |
+| Phase 3: 去重管理 | ✅ 完成 | dedup_manager.py (SQLite 会话去重) |
 | Phase 4: 配置管理 | ✅ 完成 | config_manager.py (6 个配置项) |
 | Phase 5: 状态机+意图 | ✅ 完成 | conversation_state.py + intent_parser.py |
 | Phase 6: 主逻辑集成 | ✅ 完成 | main.py 完整版 (所有 handler + NL 拦截器) |
@@ -274,7 +278,7 @@ Pixiv 漫画和插画图集包含多张图片。`IllustInfo` 通过 `page_count`
 
 - 类名: PascalCase (`PixivClient`, `DedupManager`)
 - 方法/函数: snake_case (`search_by_id`, `is_duplicate`)
-- 私有方法: 前缀 `_` (`_cleanup_global`, `_ensure_logged_in`)
+- 私有方法: 前缀 `_` (`_cleanup_session`, `_ensure_logged_in`)
 - 常量: UPPER_SNAKE_CASE (`DEFAULT_CONFIG`, `STATE_TIMEOUT`)
 
 ### 错误处理

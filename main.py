@@ -677,7 +677,6 @@ class AstrBotPixivPlugin(Star):
                 yield event.plain_result(f"❌ 图片下载失败，请稍后重试。\n{info.page_url}")
                 return
 
-            self.dedup_mgr.mark_sent(info.illust_id, session_id)
             img_path = self._save_temp_image(image_bytes, info.illust_id)
             msg = info.to_message_text(info_cfg)
             if total > 1 and msg:
@@ -698,6 +697,8 @@ class AstrBotPixivPlugin(Star):
                 apology = await self._check_and_moderate(event, image_bytes, info, img_path)
                 if apology:
                     yield event.plain_result(apology)
+
+            self.dedup_mgr.mark_sent(info.illust_id, session_id)
 
     # ==================================================================
     # 图片发送（低级 API，返回 message_id 用于撤回）

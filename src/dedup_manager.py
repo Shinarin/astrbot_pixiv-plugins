@@ -3,9 +3,9 @@
 # ============================================================================
 # 负责记录和查询已发送的 Pixiv 作品 ID，避免短期内重复发送。
 #
-# 去重策略（双层）:
-#   1. 全局去重: 最近 N 张（默认100），跨会话生效
-#   2. 会话去重: 每会话最近 M 张（默认20），仅当前会话生效
+# 去重策略:
+#   每个会话（群聊/私聊）独立记录最近 N 张已发送图片（默认20），
+#   会话之间互不干扰。
 #
 # 存储: 插件自己的 SQLite 数据库文件（data/pixiv_dedup.db）
 #       使用标准 sqlite3 模块，简单可靠，不依赖 AstrBot 内部 DB API
@@ -27,7 +27,6 @@ class DedupManager:
     所有操作均为同步（sqlite3 不支持异步），但操作极快（微秒级）。
     """
 
-    TABLE_GLOBAL = "pixiv_sent_global"
     TABLE_SESSION = "pixiv_sent_session"
 
     def __init__(self, context, config_mgr) -> None:
@@ -69,12 +68,6 @@ class DedupManager:
     def _create_tables(self) -> None:
         """创建去重记录表。"""
         self._conn.execute(f"""
-            CREATE TABLE IF NOT EXISTS {self.TABLE_GLOBAL} (
-                illust_id INTEGER PRIMARY KEY,
-                sent_at TEXT NOT NULL
-            )
-        """)
-        self._conn.execute(f"""
             CREATE TABLE IF NOT EXISTS {self.TABLE_SESSION} (
                 session_id TEXT NOT NULL,
                 illust_id INTEGER NOT NULL,
@@ -89,15 +82,8 @@ class DedupManager:
     # ------------------------------------------------------------------
 
     def is_duplicate(self, illust_id: int, session_id: str) -> bool:
-        """检查作品是否已在全局或当前会话中发送过。"""
+        """检查作品是否已在当前会话中发送过。"""
         with self._lock:
-            row = self._conn.execute(
-                f"SELECT 1 FROM {self.TABLE_GLOBAL} WHERE illust_id = ?",
-                (illust_id,),
-            ).fetchone()
-            if row:
-                return True
-
             row = self._conn.execute(
                 f"SELECT 1 FROM {self.TABLE_SESSION} WHERE session_id = ? AND illust_id = ?",
                 (session_id, illust_id),
@@ -113,34 +99,15 @@ class DedupManager:
         now = self._now_iso()
         with self._lock:
             self._conn.execute(
-                f"INSERT OR REPLACE INTO {self.TABLE_GLOBAL} (illust_id, sent_at) VALUES (?, ?)",
-                (illust_id, now),
-            )
-            self._conn.execute(
                 f"INSERT OR REPLACE INTO {self.TABLE_SESSION} (session_id, illust_id, sent_at) VALUES (?, ?, ?)",
                 (session_id, illust_id, now),
             )
             self._conn.commit()
-        # 清理（不需要锁住查询操作）
-        self._cleanup_global()
         self._cleanup_session(session_id)
 
     # ------------------------------------------------------------------
     # 清理
     # ------------------------------------------------------------------
-
-    def _cleanup_global(self) -> None:
-        """清理全局表中超限的旧记录。"""
-        limit = self._config.get("global_dedup_limit", 100)
-        with self._lock:
-            self._conn.execute(f"""
-                DELETE FROM {self.TABLE_GLOBAL}
-                WHERE illust_id NOT IN (
-                    SELECT illust_id FROM {self.TABLE_GLOBAL}
-                    ORDER BY sent_at DESC LIMIT ?
-                )
-            """, (limit,))
-            self._conn.commit()
 
     def _cleanup_session(self, session_id: str) -> None:
         """清理指定会话中超限的旧记录。"""
@@ -157,7 +124,6 @@ class DedupManager:
 
     def _cleanup_all(self) -> None:
         """初始化时清理所有超限记录。"""
-        self._cleanup_global()
         rows = self._conn.execute(
             f"SELECT DISTINCT session_id FROM {self.TABLE_SESSION}"
         ).fetchall()
@@ -170,16 +136,11 @@ class DedupManager:
 
     def get_stats(self) -> dict:
         """获取去重统计信息。"""
-        global_count = self._conn.execute(
-            f"SELECT COUNT(*) FROM {self.TABLE_GLOBAL}"
-        ).fetchone()[0]
         session_count = self._conn.execute(
             f"SELECT COUNT(*) FROM {self.TABLE_SESSION}"
         ).fetchone()[0]
         return {
-            "global_sent_count": global_count,
             "session_sent_count": session_count,
-            "global_limit": self._config.get("global_dedup_limit", 100),
             "session_limit": self._config.get("session_dedup_limit", 20),
         }
 

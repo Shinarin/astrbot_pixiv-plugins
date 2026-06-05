@@ -21,7 +21,6 @@ DEFAULT_CONFIG = {
     "r18_mode": "safe",
     "r18_admin_id": "",
     "tag_blacklist": "futa",
-    "global_dedup_limit": 100,
     "session_dedup_limit": 20,
     "search_max_results": 10,
     "max_retry_count": 3,
