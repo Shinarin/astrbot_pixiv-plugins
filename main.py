@@ -194,19 +194,25 @@ class AstrBotPixivPlugin(Star):
         try:
             self.context.register_llm_tool(
                 name="pixiv_search_by_id",
-                func_args=["illust_id"],
+                func_args=[
+                    {"type": "int", "name": "illust_id", "description": "Pixiv 作品 ID"}
+                ],
                 desc="按 Pixiv 作品 ID 搜索插画。illust_id 为数字 ID。",
                 func_obj=self._tool_search_by_id,
             )
             self.context.register_llm_tool(
                 name="pixiv_search_by_tag",
-                func_args=["tag"],
+                func_args=[
+                    {"type": "string", "name": "tag", "description": "搜索标签/关键词"}
+                ],
                 desc="按标签/关键词搜索 Pixiv 插画。tag 为搜索关键词。",
                 func_obj=self._tool_search_by_tag,
             )
             self.context.register_llm_tool(
                 name="pixiv_toggle_r18",
-                func_args=["enable"],
+                func_args=[
+                    {"type": "bool", "name": "enable", "description": "true=过滤R18, false=不过滤"}
+                ],
                 desc="开启或关闭 Pixiv R18 内容过滤。enable=true 表示过滤。",
                 func_obj=self._tool_toggle_r18,
             )
