@@ -6,6 +6,7 @@
 
 - **修复 `context.llm_generate()` 缺少必传 `chat_provider_id`**：回退路径和审核回退路径通过 `get_all_providers()` 获取默认 provider ID，避免 TypeError
 - **修复内容审核撤回 `message_id=None` 导致撤回失效**：`_check_and_moderate()` 新增 `message_id` 参数，`_send_illust_images()` 传递真实消息 ID，确保审核触发时能正确撤回
+- **修复 LLM Tool 注册失败（v4.25.2+ JSON Schema 校验）**：`func_args` 中 `"int"` → `"integer"`、`"bool"` → `"boolean"`，符合 JSON Schema 类型规范
 
 ## 🔧 优化
 
@@ -15,7 +16,12 @@
 - **`_extract_tag()` 噪声词优化**：按长度降序排列避免短词误伤，新增短噪声字集合精确过滤
 - **临时图片文件自动清理**：新增 `_cleanup_temp_file()`，发送完成后立即删除临时文件，防止磁盘堆积
 - **`DedupManager` 数据库自动重连**：新增 `_ensure_connection()` 健康检查，连接断开时自动恢复
+- **修正 `astrbot_version` 最低要求**：`>=4.0.0` → `>=4.5.7`（插件依赖 `context.llm_generate()`）
+
+## 📝 文档
+
 - **DEVELOPMENT.md 文档完善**：修正架构图（LLM 优先→关键词回退）、补充缺失文件、新增核心方法速查表
+- **新增 `.github/skills/pixiv-plugin-dev/SKILL.md`**：定义本项目专属的开发工作流规范（环境初始化、Git 规则、文档同步、代码规范）
 
 ---
 

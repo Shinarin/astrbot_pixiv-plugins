@@ -14,7 +14,7 @@ author: Shinarin
 repo: https://github.com/Shinarin/astrbot_plugin_search_pixiv_pic
 
 # AstrBot 最低版本要求（v4+ 支持 Star 基类）
-astrbot_version: ">=4.0.0"
+astrbot_version: ">=4.5.7"
 
 # 支持的平台列表（空 = 所有平台通用）
 # 常见值: aiocqhttp, qq, wechat, telegram, discord
