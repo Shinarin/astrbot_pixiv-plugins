@@ -631,11 +631,51 @@ class PixivClient:
         max_pages_per_tag: int = 0,
     ) -> Optional[IllustInfo]:
         """
-        依次尝试多个标签搜索，返回第一个匹配的新鲜作品。
+        多标签智能搜索：优先组合标签（AND 搜索），再依次尝试单个标签。
+
+        策略：
+          1. 组合标签: tag[0] + tag[-2]（游戏/系列 + 角色名，如 "原神 ニコ"）
+          2. 组合标签: 全部标签空格拼接（最精准，如 "原神 天使 ニコ"）
+          3. 单个标签依次尝试（回退）
+
+        Pixiv API 以空格分隔的词做 AND 搜索，能精准定位"某游戏的某角色"。
         """
         if max_pages_per_tag <= 0:
             max_pages_per_tag = self._config.get("search_max_pages", 10)
 
+        # ---- 仅当有 ≥2 个非原始标签时尝试组合搜索 ----
+        meaningful = [t for t in tags if len(t) <= 20]  # 排除超长原始查询
+        if len(meaningful) >= 2:
+            # 组合 1: 首标签（游戏/系列）+ 倒数第二个（角色名）
+            pair = f"{meaningful[0]} {meaningful[-1]}"
+            logger.info(f"[pixiv:client] 🔗 组合搜索: '{pair}'")
+            result = await self.find_fresh_illust(
+                tag=pair,
+                session_id=session_id,
+                dedup_mgr=dedup_mgr,
+                r18_mode=r18_mode,
+                max_pages=max_pages_per_tag,
+            )
+            if result is not None:
+                logger.info(f"[pixiv:client] ✅ 组合标签 '{pair}' 找到作品: {result.illust_id}")
+                return result
+
+            # 组合 2: 全部标签拼接（更精准但可能命中少）
+            if len(meaningful) >= 3:
+                all_combined = " ".join(meaningful)
+                logger.info(f"[pixiv:client] 🔗 组合搜索: '{all_combined}'")
+                result = await self.find_fresh_illust(
+                    tag=all_combined,
+                    session_id=session_id,
+                    dedup_mgr=dedup_mgr,
+                    r18_mode=r18_mode,
+                    max_pages=max_pages_per_tag,
+                )
+                if result is not None:
+                    logger.info(f"[pixiv:client] ✅ 组合标签 '{all_combined}' 找到作品: {result.illust_id}")
+                    return result
+
+        # ---- 回退: 单个标签依次尝试 ----
         empty_tag_count = 0  # 连续首页为空的标签计数
         for tag in tags:
             logger.info(f"[pixiv:client] 尝试标签: '{tag}'")

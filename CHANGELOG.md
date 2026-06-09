@@ -8,6 +8,12 @@
 - **修复内容审核撤回 `message_id=None` 导致撤回失效**：`_check_and_moderate()` 新增 `message_id` 参数，`_send_illust_images()` 传递真实消息 ID，确保审核触发时能正确撤回
 - **修复 LLM Tool 注册失败（v4.25.2+ JSON Schema 校验）**：`func_args` 中 `"int"` → `"integer"`、`"bool"` → `"boolean"`，符合 JSON Schema 类型规范
 
+## ✨ 新增
+
+- **多标签组合搜索**：`search_by_tags()` 优先尝试组合标签（AND 搜索）。如 "原神"+"ニコ" → "原神 ニコ"，精准定位"某游戏的某角色"，解决之前只搜单个标签命中不精准的问题
+- **角色智能解析 + 联网搜索**：`resolve_search_intent()` 用 LLM 识别用户搜索中的游戏/作品+角色名。对不确定的冷门/新角色，自动调用 AstrBot 内置联网搜索工具（Tavily/Bocha/Baidu）确认角色信息，再用准确的日文名进行 Pixiv 搜索
+- **内容审核日志增强**：记录发送给视觉模型的 prompt 和压缩后图片大小，以及模型返回的原始文本内容
+
 ## 🔧 优化
 
 - **`conversation_state.is_waiting()` 锁安全**：移除查询路径中的无锁 `pop()` 操作，超时清理由 `cleanup_expired()` 统一负责

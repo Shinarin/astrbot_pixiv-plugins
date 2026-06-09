@@ -573,8 +573,31 @@ class AstrBotPixivPlugin(Star):
         max_n = self.config_mgr.get("max_images_per_request", 3)
         count = max(1, min(count, max_n))
 
-        # 标签富化
-        enriched_tags = await self.intent_parser.enrich_tags(tag)
+        # ---- 角色智能解析（识别游戏+角色，必要时联网搜索） ----
+        resolve_result = await self.intent_parser.resolve_search_intent(tag)
+        search_tag = tag  # 用于标签富化的输入
+        if resolve_result.get("resolved") and resolve_result.get("character"):
+            game = resolve_result.get("game", "")
+            char = resolve_result.get("character", "")
+            if game and char:
+                search_tag = f"{game} {char}"
+                logger.info(f"[pixiv] 🎯 角色解析: '{tag}' → game='{game}', char='{char}'")
+            elif char:
+                search_tag = char
+                logger.info(f"[pixiv] 🎯 角色解析: '{tag}' → char='{char}'")
+
+        # 标签富化（使用解析后的搜索词）
+        enriched_tags = await self.intent_parser.enrich_tags(search_tag)
+
+        # 如果角色解析出了 game，确保它出现在标签列表前面
+        if resolve_result.get("resolved") and resolve_result.get("game"):
+            game_name = resolve_result["game"]
+            if game_name not in enriched_tags:
+                enriched_tags.insert(0, game_name)
+            # 将 game 移到第一位（确保组合搜索优先使用 game+character）
+            elif enriched_tags[0] != game_name:
+                enriched_tags.remove(game_name)
+                enriched_tags.insert(0, game_name)
 
         # 拟人化搜索提示
         if count > 1:
@@ -879,12 +902,21 @@ class AstrBotPixivPlugin(Star):
                 "- R-18 标签不一定代表极端色情，请根据实际画面判断\n"
                 "- 只回复一个数字，不要解释"
             )
+            system_prompt = "你是专业的内容安全审核员。你的任务是对图片进行色情/暴露程度评估。只回复数字，不带任何解释。"
+
+            # 日志：记录发送给模型的内容
+            logger.info(
+                f"[pixiv] 📤 审核请求 → 模型: {model_name}, "
+                f"图片压缩后: {len(compressed)} bytes, "
+                f"system: {system_prompt[:60]}..., "
+                f"prompt 长度: {len(prompt)} chars"
+            )
 
             if provider_id and self.context:
                 resp = await self.context.llm_generate(
                     chat_provider_id=provider_id,
                     prompt=prompt,
-                    system_prompt="你是专业的内容安全审核员。你的任务是对图片进行色情/暴露程度评估。只回复数字，不带任何解释。",
+                    system_prompt=system_prompt,
                     image=image_data,
                 )
             elif self.context:
@@ -894,13 +926,20 @@ class AstrBotPixivPlugin(Star):
                 resp = await self.context.llm_generate(
                     chat_provider_id=default_id,
                     prompt=prompt,
-                    system_prompt="你是专业的内容安全审核员。你的任务是对图片进行色情/暴露程度评估。只回复数字，不带任何解释。",
+                    system_prompt=system_prompt,
                     image=image_data,
                 )
             else:
                 return None
 
             text = resp.completion_text.strip() if hasattr(resp, 'completion_text') else str(resp).strip()
+
+            # 日志：记录模型反馈的原始内容
+            logger.info(
+                f"[pixiv] 📥 审核反馈 → 模型原始输出: \"{text}\" "
+                f"(长度: {len(text)} chars)"
+            )
+
             import re
             match = re.search(r'\b(\d+)\b', text)
             if match:

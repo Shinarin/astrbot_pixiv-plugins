@@ -339,7 +339,167 @@ class IntentParser:
             return None
 
     # ==================================================================
-    # 标签富化（新增）
+    # 角色智能解析（含联网搜索）
+    # ==================================================================
+
+    # 角色解析 prompt —— 识别游戏/作品 + 角色名，判断是否需要联网搜索
+    CHARACTER_RESOLVE_PROMPT = """你是二次元角色识别专家。分析用户的搜索意图，提取游戏/作品名和角色名。
+
+## 输出格式
+{"game": "游戏/作品名（没有则为空字符串）", "character": "角色名（没有则为空字符串）", "need_web_search": false, "note": "简短说明"}
+
+## 规则
+1. 如果能确定角色属于哪个游戏/作品，填写 game 字段。
+2. 如果角色名是中文昵称/简称（如"尼可"、"胡桃"），填写你知道的日文原名到 character。
+3. need_web_search: 如果你**不确定**这个角色是谁、属于哪个作品、或不确定角色的日文名，设为 true。
+4. 对于热门角色（原神、崩铁、FGO、NIKKE 等知名游戏角色），你通常能直接识别，need_web_search 应为 false。
+5. 对于非常冷门、新出、或你完全不知道的角色，need_web_search 应为 true。
+
+## 示例
+用户搜索: "原神角色天使尼可"
+{"game": "原神", "character": "ニコ", "need_web_search": false, "note": "原神角色，日文名ニコ（天使のニコ）"}
+
+用户搜索: "nikke灰姑娘"
+{"game": "NIKKE", "character": "アナキオール", "need_web_search": false, "note": "NIKKE角色灰姑娘，日文名アナキオール"}
+
+用户搜索: "猫耳少女"
+{"game": "", "character": "", "need_web_search": false, "note": "通用标签，非特定角色"}
+
+用户搜索: "xxx2025新番女主"
+{"game": "", "character": "xxx", "need_web_search": true, "note": "不确定这个角色，需要联网确认"}
+
+现在分析以下搜索词（只返回 JSON）：
+"""
+
+    async def resolve_search_intent(self, user_tag: str) -> dict:
+        """
+        解析用户搜索意图：识别游戏/作品 + 角色名，必要时联网搜索。
+
+        流程：
+          1. LLM 初步识别 → 提取 game/character + 是否需要联网
+          2. 若 need_web_search=true → 调用 AstrBot 内置联网搜索确认角色
+          3. 合并结果，返回 {"game": ..., "character": ..., "resolved": bool}
+
+        Args:
+            user_tag: 用户原始搜索词。
+
+        Returns:
+            {"game": str, "character": str, "resolved": bool, "note": str}
+        """
+        result = {"game": "", "character": "", "resolved": False, "note": ""}
+
+        # ---- Step 1: LLM 初步识别 ----
+        prompt = self.CHARACTER_RESOLVE_PROMPT + f"\n用户搜索: {user_tag}"
+        response_text = await self._call_llm(
+            prompt=prompt,
+            system_prompt="你是二次元角色识别专家。只返回 JSON，不要其他内容。",
+        )
+        if response_text:
+            try:
+                json_str = self._extract_json(response_text)
+                data = json.loads(json_str)
+                result["game"] = data.get("game", "")
+                result["character"] = data.get("character", "")
+                result["note"] = data.get("note", "")
+                need_web = data.get("need_web_search", False)
+
+                if not need_web and result["character"]:
+                    result["resolved"] = True
+                    logger.info(
+                        f"[pixiv:intent] 🎯 角色识别: game='{result['game']}', "
+                        f"character='{result['character']}' → {result['note']}"
+                    )
+                    return result
+
+                if need_web:
+                    logger.info(
+                        f"[pixiv:intent] 🔍 LLM 不确定角色，尝试联网搜索: "
+                        f"'{user_tag}' → {result.get('note', '')}"
+                    )
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.warning(f"[pixiv:intent] 角色解析 JSON 失败: {e}")
+
+        # ---- Step 2: 联网搜索确认角色 ----
+        try:
+            resolved = await self._web_search_character(user_tag)
+            if resolved:
+                result["game"] = resolved.get("game", result["game"])
+                result["character"] = resolved.get("character", result["character"])
+                result["resolved"] = True
+                result["note"] = resolved.get("note", "联网搜索确认")
+                logger.info(
+                    f"[pixiv:intent] 🌐 联网搜索完成: game='{result['game']}', "
+                    f"character='{result['character']}'"
+                )
+        except Exception as e:
+            logger.warning(f"[pixiv:intent] 联网搜索失败: {e}")
+
+        return result
+
+    async def _web_search_character(self, user_tag: str) -> dict | None:
+        """
+        使用 AstrBot 内置联网搜索工具查找角色信息。
+
+        通过 LLM + web_search tool 组合：让 LLM 搜索角色信息并提取关键字段。
+
+        Returns:
+            {"game": str, "character": str, "note": str} 或 None。
+        """
+        if not self._context:
+            return None
+
+        # 获取 AstrBot 内置的 web_search 工具
+        tool_manager = self._context.get_llm_tool_manager()
+        web_tool = None
+        # 按优先级尝试可用的联网搜索工具
+        for tool_name in ("web_search_tavily", "web_search_bocha", "web_search_baidu"):
+            try:
+                web_tool = tool_manager.get_func(tool_name)
+                if web_tool:
+                    logger.info(f"[pixiv:intent] 🌐 使用联网工具: {tool_name}")
+                    break
+            except Exception:
+                continue
+
+        if not web_tool:
+            logger.info("[pixiv:intent] 🌐 无可用联网搜索工具，跳过")
+            return None
+
+        # 构建 tool_set 并调用 LLM
+        try:
+            from astrbot.api import ToolSet
+            tool_set = ToolSet()
+            tool_set.add_tool(web_tool)
+
+            search_prompt = (
+                f"请搜索「{user_tag}」是哪个游戏/动漫作品的哪个角色。\n"
+                f"找到后，请用工具搜索确认角色的日文原名。\n"
+                f"最后用 JSON 回复: "
+                f'{{"game": "作品名", "character": "日文角色名", "note": "来源说明"}}'
+            )
+
+            providers = self._context.get_all_providers()
+            provider_id = self._config.get("llm_provider_id", "")
+            if not provider_id and providers:
+                provider_id = providers[0].meta().id
+
+            resp = await self._context.llm_generate(
+                chat_provider_id=provider_id,
+                prompt=search_prompt,
+                system_prompt="你是二次元角色搜索专家。使用搜索工具查找角色信息，只返回 JSON。",
+                tools=tool_set,
+            )
+            text = resp.completion_text.strip() if hasattr(resp, 'completion_text') else ""
+            if text:
+                json_str = self._extract_json(text)
+                return json.loads(json_str)
+        except Exception as e:
+            logger.warning(f"[pixiv:intent] 联网搜索调用失败: {e}")
+
+        return None
+
+    # ==================================================================
+    # 标签富化
     # ==================================================================
 
     async def enrich_tags(self, user_tag: str) -> list[str]:
