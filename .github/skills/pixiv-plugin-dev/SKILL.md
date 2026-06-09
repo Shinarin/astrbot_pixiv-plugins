@@ -1,6 +1,6 @@
 ---
 name: pixiv-plugin-dev
-description: 'Development workflow for astrbot_plugin_search_pixiv_pic. Use when: starting fresh in a new environment, making code changes, preparing git commits, or updating documentation. Enforces: read AstrBot docs first before any development, NEVER git push without explicit user approval, always sync CHANGELOG.md / DEVELOPMENT.md / README.md before each push.'
+description: 'Development workflow for astrbot_plugin_search_pixiv_pic. Enforces: read AstrBot docs before dev, NEVER git push without user approval, sync docs before each push.'
 argument-hint: 'Describe the task (e.g., "start fresh setup", "prepare git push", "review changes for docs")'
 user-invocable: true
 disable-model-invocation: false
@@ -56,7 +56,7 @@ disable-model-invocation: false
    - `src/config_manager.py` → `src/dedup_manager.py` → `src/conversation_state.py`
    - `src/pixiv_client.py` → `src/intent_parser.py` → `main.py`
 
-> ✅ 初始化完成后，后续的开发对话中直接基于已有认知工作，**不再**重复加载这些文档，除非涉及重大架构变更需要重新确认。
+> ✅ 初始化完成后，后续的开发对话中直接基于已有认知工作，**不再**重复加载这些文档。如果你修改了模块职责、数据流、接口、依赖版本、配置项结构或命令行为，必须重新确认 DEVELOPMENT.md / README.md。否则不需要重复阅读所有文档。
 
 ---
 
@@ -78,9 +78,31 @@ disable-model-invocation: false
 用户说"push"/"推送"   → 先同步文档（见第3节），再 git push
 ```
 
+### ⚠️ 异常处理
+
+> **失败即停止，不要猜测。**
+
+- **无待提交变更**：如果 `git status` 显示没有改动，回复"当前没有待提交的变更"，不要执行空提交。
+- **commit 失败**：如果 `git commit` 失败（如 pre-commit hook 拦截、网络问题），停止并说明错误原因，**不要**继续执行 `git push`。
+- **push 失败**：如果 `git push` 被拒绝（如远程冲突、权限不足），停止并报告具体错误，不要反复重试或猜测。
+- **检查项未通过**：如果 push 前的文档同步检查（第 3 节清单）任何一步失败或未完成，先处理问题，**不要**跳过检查强行 push。
+
 ---
 
 ## 3. 文档同步规则（Push 前必做）
+
+### Push 前检查清单（按顺序执行）
+
+执行 git push 前，按以下顺序完成：
+
+1. **更新 `CHANGELOG.md`** — 在文件顶部添加本次改动条目（见下方 3.1 节）
+2. **更新插件版本号** — `metadata.yaml` 中的 `version` 需与 CHANGELOG 最新版本保持一致
+3. **更新 `DEVELOPMENT.md`** — 如有变化（模块职责/数据流/架构/依赖/Phase 进度，见下方 3.2 节）
+4. **评估是否更新 `README.md`** — 当改动影响到用户使用界面和功能理解时更新（见下方 3.3 节）
+5. **检查 `_conf_schema.json` ↔ README 一致性** — 两者配置项必须同步（见下方 3.4 节）
+6. **检查 `requirements.txt`** — 如依赖版本变更则同步更新（见下方 3.5 节）
+
+---
 
 **每次 git push 之前**，必须完成以下文档同步：
 
@@ -100,6 +122,8 @@ disable-model-invocation: false
 - `🐛 修复` — Bug 修复
 - `📝 文档` — 纯文档更新
 
+> ⚠️ **版本递增规则**：如果 CHANGELOG 中最新的版本记录已经 push 到远程仓库，则必须递增版本号（如 v1.0.3 → v1.0.4），新建一个版本条目，不能往回追加到已发布的版本中。判断方法：`git log --oneline origin/master` 查看远程是否已有该版本对应的 commit。
+
 ### 3.2 更新 `DEVELOPMENT.md`
 
 同步更新以下内容（如有变化）：
@@ -111,7 +135,7 @@ disable-model-invocation: false
 
 ### 3.3 评估是否更新 `README.md`
 
-根据改动程度决定：
+当改动影响到用户使用界面和功能理解时，更新 README：
 
 | 改动类型 | 是否更新 README |
 |---------|---------------|
