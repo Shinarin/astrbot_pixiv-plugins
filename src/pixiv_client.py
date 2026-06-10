@@ -644,10 +644,12 @@ class PixivClient:
             max_pages_per_tag = self._config.get("search_max_pages", 10)
 
         # ---- 仅当有 ≥2 个非原始标签时尝试组合搜索 ----
-        meaningful = [t for t in tags if len(t) <= 20]  # 排除超长原始查询
-        if len(meaningful) >= 2:
-            # 组合 1: 首标签（游戏/系列）+ 倒数第二个（角色名）
-            pair = f"{meaningful[0]} {meaningful[-1]}"
+        # 最后一个是 enrich_tags() 追加的原始查询（如"原神角色天使尼可"），
+        # 这种超长短语在 Pixiv 不存在，排除它以提升组合搜索命中率
+        searchable = tags[:-1] if len(tags) > 2 else tags
+        if len(searchable) >= 2:
+            # 组合 1: 首标签 + 尾标签（游戏/系列 + 角色名，如 "原神 ニコ"）
+            pair = f"{searchable[0]} {searchable[-1]}"
             logger.info(f"[pixiv:client] 🔗 组合搜索: '{pair}'")
             result = await self.find_fresh_illust(
                 tag=pair,
@@ -660,9 +662,9 @@ class PixivClient:
                 logger.info(f"[pixiv:client] ✅ 组合标签 '{pair}' 找到作品: {result.illust_id}")
                 return result
 
-            # 组合 2: 全部标签拼接（更精准但可能命中少）
-            if len(meaningful) >= 3:
-                all_combined = " ".join(meaningful)
+            # 组合 2: 全部搜索标签拼接（更精准但可能命中少）
+            if len(searchable) >= 3:
+                all_combined = " ".join(searchable)
                 logger.info(f"[pixiv:client] 🔗 组合搜索: '{all_combined}'")
                 result = await self.find_fresh_illust(
                     tag=all_combined,

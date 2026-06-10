@@ -371,7 +371,7 @@ class IntentParser:
 现在分析以下搜索词（只返回 JSON）：
 """
 
-    async def resolve_search_intent(self, user_tag: str) -> dict:
+    async def resolve_search_intent(self, user_tag: str, umo: str = "") -> dict:
         """
         解析用户搜索意图：识别游戏/作品 + 角色名，必要时联网搜索。
 
@@ -421,7 +421,7 @@ class IntentParser:
 
         # ---- Step 2: 联网搜索确认角色 ----
         try:
-            resolved = await self._web_search_character(user_tag)
+            resolved = await self._web_search_character(user_tag, umo)
             if resolved:
                 result["game"] = resolved.get("game", result["game"])
                 result["character"] = resolved.get("character", result["character"])
@@ -436,7 +436,7 @@ class IntentParser:
 
         return result
 
-    async def _web_search_character(self, user_tag: str) -> dict | None:
+    async def _web_search_character(self, user_tag: str, umo: str = "") -> dict | None:
         """
         使用 AstrBot 内置联网搜索工具查找角色信息。
 
@@ -448,21 +448,43 @@ class IntentParser:
         if not self._context:
             return None
 
-        # 获取 AstrBot 内置的 web_search 工具
+        # 获取 AstrBot 内置 web_search 工具
+        # 照搬 AstrBot 源码 _apply_web_search_tools 的做法：
+        #   读会话配置 websearch_provider → 映射工具类 → get_builtin_tool()
         tool_manager = self._context.get_llm_tool_manager()
-        web_tool = None
-        # 按优先级尝试可用的联网搜索工具
-        for tool_name in ("web_search_tavily", "web_search_bocha", "web_search_baidu"):
-            try:
-                web_tool = tool_manager.get_func(tool_name)
-                if web_tool:
-                    logger.info(f"[pixiv:intent] 🌐 使用联网工具: {tool_name}")
-                    break
-            except Exception:
-                continue
 
-        if not web_tool:
-            logger.info("[pixiv:intent] 🌐 无可用联网搜索工具，跳过")
+        # 读取当前会话的 provider_settings（需 umo 获取正确的会话配置）
+        cfg = self._context.get_config(umo=umo) if umo else self._context.get_config()
+        prov_settings = cfg.get("provider_settings", {})
+        provider = prov_settings.get("websearch_provider", "tavily")
+
+        from astrbot.core.tools.web_search_tools import (
+            BaiduWebSearchTool,
+            BochaWebSearchTool,
+            BraveWebSearchTool,
+            FirecrawlWebSearchTool,
+            TavilyWebSearchTool,
+        )
+        tool_class_map = {
+            "tavily": TavilyWebSearchTool,
+            "bocha": BochaWebSearchTool,
+            "brave": BraveWebSearchTool,
+            "baidu_ai_search": BaiduWebSearchTool,
+            "firecrawl": FirecrawlWebSearchTool,
+        }
+        tool_cls = tool_class_map.get(provider)
+        web_tool = tool_manager.get_builtin_tool(tool_cls) if tool_cls else None
+
+        if web_tool:
+            logger.info(
+                f"[pixiv:intent] 🌐 使用联网工具: {web_tool.name} "
+                f"(provider={provider})"
+            )
+        else:
+            logger.info(
+                f"[pixiv:intent] 🌐 无可用联网搜索工具 "
+                f"(provider={provider or '未配置'})，跳过"
+            )
             return None
 
         # 构建 tool_set 并调用 LLM

@@ -1,5 +1,18 @@
 # What's Changed
 
+> 📢 v1.0.4 → v1.0.5
+
+## 🐛 修复
+
+- **修复组合搜索包含原始查询导致命中率为零**：`search_by_tags()` 组合搜索跳过 `enrich_tags()` 追加的原始短语（如"原神角色天使尼可"），只用真正的 Pixiv 标签做 AND 搜索（如"原神 ニコ"）
+- **修复联网搜索工具获取失败**：照搬 AstrBot 源码 `_apply_web_search_tools` 做法，用 `get_config(umo=umo)` + `get_builtin_tool()` 替代错误的 `func_list` 遍历，确保获取到当前会话配置的网页搜索提供商
+
+## 🔧 优化
+
+- **非本插件指令跳过 LLM 识别**：收到 `/` 开头但不是 `/pixiv` 的消息直接透传给 AstrBot，不再浪费 LLM 调用
+
+---
+
 > 📢 v1.0.3 → v1.0.4
 
 ## 📝 文档
