@@ -84,23 +84,25 @@ astrbot_plugin_search_pixiv_pic/
     └───────────────────────────┘
 ```
 
-### 搜索管线（search_by_tag → find_fresh_illust → 加权随机）
+### 搜索管线（enrich_tags → search_by_tags → 分级采集+加权随机）
 
 ```
-search_by_tag(tag, page=N)          ← 每页返回全部合格作品（R18/质量/黑名单过滤后）
-  │                                   不随机、不采样，按收藏降序
+enrich_tags(user_tag)               ← LLM 多维标签富化
+  │  输出: {flat: [...], game: [...], character: [...],
+  │         attributes: [{tags:["巨乳","おっぱい"],label:"大胸"}, ...]}
   ▼
-find_fresh_illust(tag, session_id)  ← 遍历 1~max_pages 页
-  │   for page in 1..max_pages:
-  │       results = search_by_tag(tag, page)
-  │       for info in results:
-  │           if not dedup.is_duplicate(info.illust_id, session_id):
-  │               fresh_pool.append(info)     ← 收集全部未发送作品
+search_by_tags(flat, enrichment)    ← 4 阶段分级搜索
   │
-  ▼
-加权随机选图                            ← 最后一步才随机
-      weights = [info.bookmarks + 1 for info in fresh_pool]
-      picked = random.choices(fresh_pool, weights=weights, k=1)[0]
+  ├─ 阶段 0: 降维梯度搜索 (k=N→2)
+  │    全局池跨 k 级积累，每级最多5次随机组合
+  │    满阈值(默认30)即停，不足最低(默认10)则降维继续
+  │    k=3: game+char+金髪+巨乳+白タイツ → 池积累
+  │    k=2: game+char+巨乳+白タイツ     → 池积累（金发被随机丢弃）
+  │    → 加权随机选图
+  │
+  ├─ 阶段 1: base(游戏+角色) × 每组1随机tag → 池化→加权随机
+  ├─ 阶段 2: 单维度标签搜索 → 池化→加权随机
+  └─ 阶段 3: flat 标签逐个短路搜索（兜底）
 ```
 
 > ⚠️ **架构要点**: 随机必须在去重之后。如果先去重前随机采样，可能抽到的全是已发送作品，
@@ -137,11 +139,12 @@ find_fresh_illust(tag, session_id)  ← 遍历 1~max_pages 页
   → intent_parser.parse() → LLM 分类 (6 种意图)
   → FIND_BY_TAG → _nl_find_by_tag()
     → 提取 count (LLM 识别张数)
-    → enrich_tags() 标签富化
+    → resolve_search_intent() 角色解析（必要时联网搜索）
+    → enrich_tags() 多维标签富化（同义词组格式）
     → inject_persona() 注入人格
     → generate_search_reply() 拟人化提示
-    → search_by_tags() 多标签搜索+质量回退
-    → download_image() + 发送
+    → search_by_tags() 4 阶段分级搜索
+    → download_image() + 发送 + 审核 + 标签匹配度检查
   → NOT_IMAGE_REQUEST → clear_result() + continue_event() 透传
 ```
 
@@ -171,7 +174,7 @@ find_fresh_illust(tag, session_id)  ← 遍历 1~max_pages 页
 |------|------|--------|------|
 | **入口** | `main.py` | `AstrBotPixivPlugin` | 命令注册、消息拦截、流程编排 |
 | **Pixiv** | `src/pixiv_client.py` | `PixivClient` | API 封装、认证、下载、加权随机选图、标签黑名单、🔁 token 自动刷新 |
-| **意图** | `src/intent_parser.py` | `IntentParser` | LLM 分类、反问生成、关键词匹配 |
+| **意图** | `src/intent_parser.py` | `IntentParser` | LLM 分类、多维标签富化、角色联网解析、反问/歉语/拟人化回复 |
 | **去重** | `src/dedup_manager.py` | `DedupManager` | SQLite 记录、重复检查、自动重连 |
 | **配置** | `src/config_manager.py` | `ConfigManager` | 配置读写、持久化 |
 | **状态** | `src/conversation_state.py` | `ConversationStateManager` | 对话状态、超时清理 |
@@ -180,12 +183,16 @@ find_fresh_illust(tag, session_id)  ← 遍历 1~max_pages 页
 
 | 方法 | 所在文件 | 说明 |
 |------|---------|------|
-| `_search_and_send_images()` | `main.py` | 标签搜索+多图发送的核心编排方法，串联富化→搜索→下载→发送→撤回→审核 |
-| `_send_illust_images()` | `main.py` | 发送单个作品的图片（支持多页漫画/图集），处理定时撤回和内容审核 |
-| `_send_image()` | `main.py` | 底层 OneBot API 发送图片+文字，返回 `message_id` 供撤回/审核使用 |
+| `_search_and_send_images()` | `main.py` | 标签搜索+多图发送的核心编排，串联角色解析→富化→分级搜索→发送→审核 |
+| `_send_illust_images()` | `main.py` | 发送单作品图片（支持多页漫画/图集），处理定时撤回、内容审核、标签匹配度检查 |
+| `_check_tag_coverage()` | `main.py` | 对比图片标签与用户要求的同义词组，缺失时 LLM 生成人格歉语 |
+| `_send_image()` | `main.py` | 底层 OneBot API 发送图片+文字，返回 `message_id` |
 | `_cleanup_temp_file()` | `main.py` | 发送完成后删除临时图片文件 |
-| `search_by_tags()` | `pixiv_client.py` | 多标签依次搜索，找到第一个匹配的新鲜作品即返回 |
-| `find_fresh_illust()` | `pixiv_client.py` | 遍历多页收集未发送作品，加权随机选图；高质量无结果时回退关闭收藏数过滤 |
+| `resolve_search_intent()` | `intent_parser.py` | LLM 识别游戏+角色，不确定时调用 AstrBot 内置联网搜索 |
+| `enrich_tags()` | `intent_parser.py` | 多维标签富化，返回 `{flat, game, character, attributes:[同义词组]}` 结构 |
+| `search_by_tags()` | `pixiv_client.py` | 4 阶段分级搜索：降维梯度(每级5次随机)→base×attr池化→单维度池化→flat短路 |
+| `collect_fresh_illusts()` | `pixiv_client.py` | 同 find_fresh_illust 池收集逻辑，返回完整列表供阶段0池积累 |
+| `find_fresh_illust()` | `pixiv_client.py` | 遍历多页收集未发送作品，加权随机选图；高质量无结果时回退 |
 | `_ensure_connection()` | `dedup_manager.py` | 数据库连接健康检查与自动重连 |
 
 ---
@@ -197,7 +204,7 @@ find_fresh_illust(tag, session_id)  ← 遍历 1~max_pages 页
 | `pixivpy3` | ≥3.0.0 | Pixiv 非官方 API |
 | `httpx` | ≥0.25.0 | 异步 HTTP 客户端（图片下载） |
 | `Pillow` | ≥10.0.0 | 图片处理（可选） |
-| `AstrBot` | ≥4.0.0 | 插件框架（隐式依赖） |
+| `AstrBot` | ≥4.5.7 | 插件框架（隐式依赖，需要 `context.llm_generate()`） |
 
 ---
 
@@ -274,6 +281,11 @@ Pixiv 漫画和插画图集包含多张图片。`IllustInfo` 通过 `page_count`
 - [x] 智能失败建议：按连续空搜索次数分级提示
 - [x] 定时撤回：图片发送后 N 秒自动撤回
 - [x] 视觉模型内容审核：压缩→视觉 LLM 评分→超阈值撤回+道歉
+- [x] 多维标签富化：LLM 同义词组格式，日语优先
+- [x] 降维梯度搜索：多特征自动 -1 继续，每级5次随机组合
+- [x] 标签匹配度检查：缺失特征 LLM 人格歉语
+- [x] 角色联网搜索：调用 AstrBot 内置网页搜索工具确认角色
+- [x] 搜索候选池配置：目标张数 + 最低接受张数，跨维度积累
 - [ ] 画师搜索
 - [ ] 排行榜浏览
 - [ ] WebUI 管理面板
