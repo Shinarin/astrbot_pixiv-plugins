@@ -45,9 +45,9 @@
   },
   "llm_provider_id": {
     "type": "string",
-    "description": "插件专用 LLM 提供商",
+    "description": "插件专用 LLM 提供商（强烈建议 DeepSeek V4）",
     "default": "",
-    "hint": "用于意图识别和标签富化的 LLM。留空则使用 AstrBot 默认 LLM。",
+    "hint": "用于意图识别、标签富化、角色联网搜索的 LLM。强烈建议使用 DeepSeek V4 模型，Function Calling 兼容性最好、效果最佳、价格最低。留空则使用 AstrBot 默认 LLM。",
     "_special": "select_provider"
   },
   "tag_enrichment_enabled": {

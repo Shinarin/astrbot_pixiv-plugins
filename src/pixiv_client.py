@@ -168,6 +168,9 @@ class IllustInfo:
         """
         返回多图作品各页的图片 URL，按质量筛选，最多 max_pages 张。
 
+        Pixiv API 的 meta_pages[].image_urls 不包含 original 键（仅 meta_single_page 有），
+        需要从 large URL 反推构造 original URL。
+
         Args:
             quality:    "original" | "large" | "medium"
             max_pages:  最多返回页数
@@ -179,6 +182,11 @@ class IllustInfo:
         for page_urls in self.all_page_urls[:max_pages]:
             if quality == "original" and page_urls.get("original"):
                 urls.append(page_urls["original"])
+            elif quality == "original":
+                # meta_pages 不含 original → 从 large 反推
+                large_url = page_urls.get("large") or page_urls.get("medium") or ""
+                if large_url:
+                    urls.append(self._convert_to_original_url(large_url))
             elif quality == "large" and page_urls.get("large"):
                 urls.append(page_urls["large"])
             elif quality == "medium" and page_urls.get("medium"):
@@ -189,6 +197,30 @@ class IllustInfo:
                 if url:
                     urls.append(url)
         return urls
+
+    @staticmethod
+    def _convert_to_original_url(large_url: str) -> str:
+        """
+        从 Pixiv master1200 URL 反推构造 original URL。
+
+        large:   https://i.pximg.net/c/600x1200_90/img-master/img/.../ID_p0_master1200.jpg
+        original:https://i.pximg.net/img-original/img/.../ID_p0.jpg
+
+        也兼容 webp 变体（路径含 _webp）和 png 格式。
+        """
+        import re
+
+        # 匹配 /img-master/ 或 /img-original/ 之后的部分
+        m = re.search(r'(/img-(?:master|original)/.+)', large_url)
+        if not m:
+            return large_url
+
+        path = m.group(1)
+        # /img-master/... → /img-original/...
+        path = path.replace('/img-master/', '/img-original/')
+        # 去掉 _master1200 后缀
+        path = re.sub(r'_master\d+(?=\.\w+$)', '', path)
+        return f"https://i.pximg.net{path}"
 
     def to_message_text(self, info_config: dict | None = None) -> str | None:
         """

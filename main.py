@@ -663,7 +663,8 @@ class AstrBotPixivPlugin(Star):
         moderation_on = self.config_mgr.get("content_moderation_enabled", False)
 
         if info.is_multi_page:
-            page_urls = info.get_page_urls_for_quality(quality, max_pages)
+            # 多图作品优先取原图（内部自动从 large 反推 original URL）
+            page_urls = info.get_page_urls_for_quality("original", max_pages)
             total_pages = info.page_count
             for pi, page_url in enumerate(page_urls):
                 page_bytes = await self.pixiv_client.download_image(page_url)
@@ -957,7 +958,6 @@ class AstrBotPixivPlugin(Star):
 
             from PIL import Image
             import io
-            import base64
 
             # 压缩到约 100KB
             img = Image.open(io.BytesIO(image_bytes))
@@ -979,14 +979,25 @@ class AstrBotPixivPlugin(Star):
                 quality -= 10
             compressed = buf.getvalue()
 
-            # Base64 编码
-            b64 = base64.b64encode(compressed).decode("utf-8")
-            image_data = f"data:image/jpeg;base64,{b64}"
+            # 保存压缩后的图片为临时文件（比 base64 data URI 兼容性更好）
+            import tempfile
+            tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+            tmp.write(compressed)
+            tmp.close()
+            image_path = tmp.name
 
-            # 调用视觉模型
+            # ---- 调用视觉模型审核 ----
+            # 直接使用 AstrBot 的 llm_generate（不绕路），异常时静默放过
             provider_id = self.config_mgr.get("content_moderation_provider", "")
-            model_name = self._get_provider_model_name(provider_id) or provider_id or "默认视觉模型"
-            logger.info(f"[pixiv] 内容审核中... 模型: {model_name}")
+            model_name = (
+                self._get_provider_model_name(provider_id)
+                or provider_id or "默认视觉模型"
+            )
+            logger.info(
+                f"[pixiv] 内容审核中... 模型: {model_name}, "
+                f"图片压缩后: {len(compressed)} bytes"
+            )
+
             prompt = (
                 "你是内容安全审核员。请对这张图片进行色情/暴露程度评估，给出 0~10 的整数评分。\n\n"
                 "## 评分标准\n"
@@ -999,52 +1010,70 @@ class AstrBotPixivPlugin(Star):
                 "- R-18 标签不一定代表极端色情，请根据实际画面判断\n"
                 "- 只回复一个数字，不要解释"
             )
-            system_prompt = "你是专业的内容安全审核员。你的任务是对图片进行色情/暴露程度评估。只回复数字，不带任何解释。"
+            system_prompt = "你是专业的内容安全审核员。只回复数字，不带任何解释。"
 
-            # 日志：记录发送给模型的内容
-            logger.info(
-                f"[pixiv] 📤 审核请求 → 模型: {model_name}, "
-                f"图片压缩后: {len(compressed)} bytes, "
-                f"system: {system_prompt[:60]}..., "
-                f"prompt 长度: {len(prompt)} chars"
+            score = await self._call_moderation_llm(
+                provider_id, model_name, image_path, prompt, system_prompt
             )
+            return score
+        except Exception as e:
+            logger.warning(f"[pixiv] 视觉模型审核调用失败: {e}")
+            return None
+        finally:
+            # 清理审核临时文件
+            try:
+                if 'image_path' in dir() and image_path:
+                    os.remove(image_path)
+            except OSError:
+                pass
 
-            if provider_id and self.context:
+    async def _call_moderation_llm(
+        self, provider_id: str, model_name: str,
+        image_path: str, prompt: str, system_prompt: str,
+    ) -> int | None:
+        """
+        调用 AstrBot llm_generate 审核图片，异常时返回 None（静默放过）。
+
+        AstrBot v4.25.2 多模态响应处理有 usage=None 的 bug，
+        但 llm_generate 内部会抛异常，此处捕获后返回 None，
+        不影响图片正常发送（审核跳过）。
+        """
+        try:
+            if not self.context:
+                return None
+
+            if provider_id:
                 resp = await self.context.llm_generate(
                     chat_provider_id=provider_id,
                     prompt=prompt,
                     system_prompt=system_prompt,
-                    image=image_data,
+                    image_urls=[image_path],
                 )
-            elif self.context:
-                # 获取默认 provider ID（AstrBot v4.5+ 要求必传 chat_provider_id）
+            else:
                 providers = self.context.get_all_providers()
                 default_id = providers[0].meta().id if providers else ""
                 resp = await self.context.llm_generate(
                     chat_provider_id=default_id,
                     prompt=prompt,
                     system_prompt=system_prompt,
-                    image=image_data,
+                    image_urls=[image_path],
                 )
-            else:
-                return None
 
-            text = resp.completion_text.strip() if hasattr(resp, 'completion_text') else str(resp).strip()
-
-            # 日志：记录模型反馈的原始内容
+            text = (getattr(resp, 'completion_text', None) or "").strip()
             logger.info(
-                f"[pixiv] 📥 审核反馈 → 模型原始输出: \"{text}\" "
-                f"(长度: {len(text)} chars)"
+                f"[pixiv] 📥 审核反馈 → \"{text}\" (长度: {len(text)} chars)"
             )
 
             import re
             match = re.search(r'\b(\d+)\b', text)
             if match:
-                score = int(match.group(1))
-                return max(0, min(10, score))
+                return max(0, min(10, int(match.group(1))))
             return None
+
         except Exception as e:
-            logger.debug(f"[pixiv] 视觉模型审核调用失败: {e}")
+            logger.info(
+                f"[pixiv] 审核调用异常（非关键，图片正常发送）: {type(e).__name__}: {e}"
+            )
             return None
 
     def _check_provider_supports_image(self, provider_id: str) -> bool:

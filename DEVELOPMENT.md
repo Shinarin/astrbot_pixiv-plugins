@@ -188,11 +188,13 @@ search_by_tags(flat, enrichment)    ← 4 阶段分级搜索
 | `_check_tag_coverage()` | `main.py` | 对比图片标签与用户要求的同义词组，缺失时 LLM 生成人格歉语 |
 | `_send_image()` | `main.py` | 底层 OneBot API 发送图片+文字，返回 `message_id` |
 | `_cleanup_temp_file()` | `main.py` | 发送完成后删除临时图片文件 |
+| `_call_moderation_llm()` | `main.py` | 封装 llm_generate 审核调用，try/except 防御 AstrBot v4.25.2 多模态 usage bug |
 | `resolve_search_intent()` | `intent_parser.py` | LLM 识别游戏+角色，不确定时调用 AstrBot 内置联网搜索 |
 | `enrich_tags()` | `intent_parser.py` | 多维标签富化，返回 `{flat, game, character, attributes:[同义词组]}` 结构 |
 | `search_by_tags()` | `pixiv_client.py` | 4 阶段分级搜索：降维梯度(每级5次随机)→base×attr池化→单维度池化→flat短路 |
 | `collect_fresh_illusts()` | `pixiv_client.py` | 同 find_fresh_illust 池收集逻辑，返回完整列表供阶段0池积累 |
 | `find_fresh_illust()` | `pixiv_client.py` | 遍历多页收集未发送作品，加权随机选图；高质量无结果时回退 |
+| `_convert_to_original_url()` | `pixiv_client.py` | 从 Pixiv large URL 反推 original URL（img-master→img-original，去 _master1200） |
 | `_ensure_connection()` | `dedup_manager.py` | 数据库连接健康检查与自动重连 |
 
 ---
@@ -261,10 +263,12 @@ Pixiv 漫画和插画图集包含多张图片。`IllustInfo` 通过 `page_count`
 ### 视觉模型内容审核
 
 开启 `content_moderation_enabled` 后，`_check_and_moderate()` 在图片发送后执行：
-1. `_moderate_image()` 用 Pillow 压缩图片到 ~100KB、Base64 编码
-2. 通过 `context.llm_generate(image=...)` 发送给视觉 LLM（优先 `content_moderation_provider`，回退默认 provider）
+1. `_moderate_image()` 用 Pillow 压缩图片到 ~100KB，保存为临时文件
+2. 通过 `_call_moderation_llm()` → `context.llm_generate(image_urls=[file_path])` 发送给视觉 LLM
 3. 解析模型返回的 0~10 评分
 4. 若评分 > `nsfw_threshold`（默认 8），通过 `message_id` 撤回图片并调用 `_generate_moderation_apology()` 生成带人格预设的道歉回复
+
+> **已知问题**: AstrBot v4.25.2 处理多模态响应时 `usage=None` 导致 `input_tokens` 崩溃。`_call_moderation_llm()` 已做 try/except 防御，异常时返回 None（审核跳过，图片正常发送）。
 
 视觉模型可通过 `content_moderation_provider`（`_special: select_provider`）独立选择。
 审核后发送的临时图片文件由 `_cleanup_temp_file()` 自动清理。

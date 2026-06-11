@@ -1,5 +1,21 @@
 # What's Changed
 
+> 📢 v1.0.7 → v1.0.8
+
+## 🐛 修复
+
+- **多图作品发送原图**：Pixiv API 的 `meta_pages[].image_urls` 不含 `original` 键，导致漫画/图集始终发送压缩版。新增 `_convert_to_original_url()` 从 `large` URL 反推 `original` URL（`img-master`→`img-original`，去 `_master1200` 后缀）
+- **内容审核图片传参修正**：`image=image_data`（单数 kwarg）→ `image_urls=[image_path]`（标准参数），确保图片进入 AstrBot 多模态处理流程
+- **内容审核默认提供商视觉能力检查**：留空使用默认 LLM 时跳过视觉能力预检，导致纯文本模型收到图片始终返回 "0"
+
+## 🔧 优化
+
+- **内容审核图片传递方式**：base64 data URI → 临时文件路径，兼容性更好
+- **内容审核代码精简**：删除 ~200 行无效的 SDK/HTTP 端点探测代码，统一为 `_call_moderation_llm()` 单入口 + try/except 防御
+- **插件专用 LLM 提供商说明**：强烈建议使用 DeepSeek V4 模型
+
+---
+
 > 📢 v1.0.6 → v1.0.7
 
 ## ✨ 新增
