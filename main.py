@@ -593,18 +593,9 @@ class AstrBotPixivPlugin(Star):
                 search_tag = char
                 logger.info(f"[pixiv] 🎯 角色解析: '{tag}' → char='{char}'")
 
-        # 标签富化（使用解析后的搜索词）
-        enriched_tags = await self.intent_parser.enrich_tags(search_tag)
-
-        # 如果角色解析出了 game，确保它出现在标签列表前面
-        if resolve_result.get("resolved") and resolve_result.get("game"):
-            game_name = resolve_result["game"]
-            if game_name not in enriched_tags:
-                enriched_tags.insert(0, game_name)
-            # 将 game 移到第一位（确保组合搜索优先使用 game+character）
-            elif enriched_tags[0] != game_name:
-                enriched_tags.remove(game_name)
-                enriched_tags.insert(0, game_name)
+        # 标签富化（返回结构化多维标签 dict）
+        enrichment = await self.intent_parser.enrich_tags(search_tag)
+        flat_tags = enrichment.get("flat", [tag])
 
         # 拟人化搜索提示
         if count > 1:
@@ -614,7 +605,7 @@ class AstrBotPixivPlugin(Star):
         if self.config_mgr.get("humanized_reply_enabled", True):
             # 注入当前 AstrBot 人格提示词，让回复带有人格风味
             await self._inject_persona(event)
-            reply = await self.intent_parser.generate_search_reply(tag, enriched_tags)
+            reply = await self.intent_parser.generate_search_reply(tag, flat_tags)
             # 清洗 LLM 可能生成的 HTML 实体（如 &happy&）
             import html as _html
             reply = _html.unescape(reply)
@@ -629,8 +620,9 @@ class AstrBotPixivPlugin(Star):
         for i in range(count):
             try:
                 info = await self.pixiv_client.search_by_tags(
-                    tags=enriched_tags, session_id=session_id,
+                    tags=flat_tags, session_id=session_id,
                     dedup_mgr=self.dedup_mgr, r18_mode=r18_mode,
+                    enrichment=enrichment,
                 )
                 if info is None:
                     if sent == 0:
@@ -645,6 +637,7 @@ class AstrBotPixivPlugin(Star):
 
                 async for r in self._send_illust_images(
                     event, info, session_id, sent + 1, count,
+                    enrichment=enrichment,
                 ):
                     yield r
                 sent += 1
@@ -660,8 +653,9 @@ class AstrBotPixivPlugin(Star):
     async def _send_illust_images(
         self, event: AstrMessageEvent, info,
         session_id: str, index: int = 1, total: int = 1,
+        enrichment: dict | None = None,
     ):
-        """发送作品图片，支持定时撤回和内容审核。"""
+        """发送作品图片，支持定时撤回、内容审核、标签匹配度检查。"""
         quality = self.config_mgr.get("image_quality", "large")
         info_cfg = self.config_mgr.get("show_image_info", {})
         max_pages = self.config_mgr.get("max_pages_per_illust", 3)
@@ -737,6 +731,87 @@ class AstrBotPixivPlugin(Star):
                     yield event.plain_result(apology)
 
             self.dedup_mgr.mark_sent(info.illust_id, session_id)
+
+        # ---- 标签匹配度检查 ----
+        if enrichment:
+            mismatch = await self._check_tag_coverage(event, info, enrichment)
+            if mismatch:
+                yield event.plain_result(mismatch)
+
+    # ==================================================================
+    # 标签匹配度检查
+    # ==================================================================
+
+    async def _check_tag_coverage(
+        self, event: AstrMessageEvent, info, enrichment: dict,
+    ) -> str | None:
+        """
+        对比图片标签与用户要求的维度，缺失属性时生成歉语。
+
+        Returns:
+            歉语文本，如果所有维度都覆盖则返回 None。
+        """
+        # 收集图片的标签集合（小写）
+        img_tags = set(t.lower() for t in info.tags.split() if t.strip())
+
+        # 检查 attributes 维度覆盖情况
+        # 兼容两种格式：旧格式 ["巨乳", "黒タイツ"] 和新格式同义词组
+        wanted_attrs = enrichment.get("attributes", []) or []
+        missing = []
+        if wanted_attrs and isinstance(wanted_attrs[0], dict):
+            # 新格式: 同义词组 [{"tags":["巨乳","おっぱい"],"label":"大胸"}, ...]
+            for group in wanted_attrs:
+                tags = group.get("tags", [])
+                label = group.get("label", "")
+                # 任一个 tag 命中图片标签即覆盖
+                if any(tag.lower() in img_tags for tag in tags):
+                    continue
+                missing.append(label or tags[0] if tags else "?")
+        else:
+            # 旧格式: 扁平列表（向后兼容）
+            for attr in wanted_attrs:
+                if isinstance(attr, str) and attr.lower() not in img_tags:
+                    missing.append(attr)
+
+        # 检查 game 维度（game 缺失不报告，仅记录）
+        wanted_games = enrichment.get("game", []) or []
+        game_covered = any(g.lower() in img_tags for g in wanted_games)
+
+        # 检查 character 维度（character 缺失不报告，仅记录）
+        wanted_chars = enrichment.get("character", []) or []
+        char_covered = any(c.lower() in img_tags for c in wanted_chars)
+
+        if not missing:
+            return None
+
+        logger.info(
+            f"[pixiv] 🏷️ illust_id={info.illust_id}, "
+            f"missing attributes: {missing}, "
+            f"img_tags: {list(img_tags)[:15]}"
+        )
+
+        # 用人格预设 LLM 生成歉语
+        try:
+            await self._inject_persona(event)
+            persona = self.intent_parser._persona_prompt or ""
+            missing_str = "、".join(missing)
+            prompt = (
+                f"用户搜索时想要包含这些特征：{missing_str}，但找到的图片（{info.title}）"
+                f"可能缺少这些元素。请以拟人化方式简短说明（不超过30字），"
+                f"表示部分特征没找到但图片也不错。"
+            )
+            reply = await self.intent_parser._call_llm(
+                prompt=prompt,
+                system_prompt=persona or "你是友好的 Pixiv 搜索助手。",
+            )
+            if reply and len(reply.strip()) >= 3:
+                import html as _html
+                return f"💬 {_html.unescape(reply.strip())}"
+        except Exception:
+            pass
+
+        # 回退：固定模板
+        return f"💬 这张图可能缺少「{'、'.join(missing[:2])}」的元素，但我觉得也不错~"
 
     # ==================================================================
     # 图片发送（低级 API，返回 message_id 用于撤回）

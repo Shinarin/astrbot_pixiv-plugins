@@ -133,33 +133,47 @@ INTENT_CLASSIFY_PROMPT = """你是 Pixiv 插画搜索插件的意图分析器。
 
 现在分析以下用户消息（只返回 JSON，不要其他文字）：
 """
-# 标签富化 prompt —— 将中文描述转为 Pixiv 常用标签
-TAG_ENRICH_PROMPT = """你是 Pixiv 标签专家。将用户的中文搜索需求翻译为最适合在 Pixiv 上搜索的标签。
+# 标签富化 prompt —— 多维标签结构化输出
+# 将中文描述拆解为 game / character / attributes 三个维度，
+# attributes 使用同义词组格式：每组含多个日文标签 + 一个中文描述。
+TAG_ENRICH_PROMPT = """你是 Pixiv 标签专家。将用户的中文搜索需求拆解为多维度标签，用于 Pixiv 搜索。
+
+## 输出格式
+{"game": ["游戏/作品名(日文)"], "character": ["角色名(日文)"], "attributes": [{"tags": ["日文标签","日文标签"], "label": "中文描述"}]}
+
+## 维度说明
+- game: 游戏或动漫作品名。没有则为空数组。
+- character: 角色名。没有则为空数组。
+- attributes: 每个元素是一个同义词组。
+    - tags: 该特征的 Pixiv 日文标签（1~4个），同一含义的不同写法
+    - label: 该特征的中文描述（简短，2~4字）
+- 不同含义的特征必须分为不同的组（如大胸和黑丝是两个组）
+- 不要输出 R-18/NSFW 分级标签（插件已有独立的 R18 过滤机制）
 
 ## 规则
-1. Pixiv 以日文标签为主，英文标签为辅，中文标签很少
-2. 角色名优先用日文原名（如"灰姑娘"→"アナキオール"）
-3. 作品名保留最通用的写法
-4. 输出 2-3 个标签，按搜索命中率从高到低排列
-5. 只返回 JSON 数组，不要其他文字
+1. 所有标签优先使用日文(Pixiv常用标签)，其次英文，最后中文
+2. 只返回JSON，不要其他文字
 
 ## 示例
-用户搜索: "灰姑娘" (NIKKE游戏)
-["アナキオール", "NIKKE Cinderella", "灰姑娘"]
+用户搜索: "碧蓝航线大胸色图"
+{"game": ["アズールレーン"], "character": [], "attributes": [{"tags": ["巨乳", "おっぱい", "爆乳"], "label": "大胸"}]}
 
-用户搜索: "初音未来"
-["初音ミク", "Hatsune Miku", "VOCALOID"]
+用户搜索: "原神角色天使尼可"
+{"game": ["原神", "Genshin Impact"], "character": ["ニコ"], "attributes": []}
 
 用户搜索: "猫耳少女"
-["猫耳", "猫耳少女", "nekomimi"]
+{"game": [], "character": [], "attributes": [{"tags": ["猫耳", "獣耳"], "label": "猫耳"}, {"tags": ["少女"], "label": "少女"}]}
 
-用户搜索: "风景"
-["風景", "landscape", "景色"]
+用户搜索: "碧蓝黑丝大胸色图"
+{"game": ["アズールレーン"], "character": [], "attributes": [{"tags": ["巨乳", "おっぱい", "爆乳"], "label": "大胸"}, {"tags": ["黒タイツ", "パンスト", "黒ストッキング"], "label": "黑丝"}]}
 
-用户搜索: "nikke"
-["NIKKE", "ニケ", "勝利の女神NIKKE"]
+用户搜索: "长发贫胸水手服"
+{"game": [], "character": [], "attributes": [{"tags": ["ロングヘア", "長髪"], "label": "长发"}, {"tags": ["貧乳", "つるぺた"], "label": "贫乳"}, {"tags": ["セーラー服", "水手服"], "label": "水手服"}]}
 
-现在转换以下搜索词（只返回 JSON 数组）：
+用户搜索: "初音未来"
+{"game": [], "character": ["初音ミク", "Hatsune Miku"], "attributes": []}
+
+现在转换以下搜索词（只返回JSON）：
 """
 
 # 反问生成 prompt
@@ -524,44 +538,88 @@ class IntentParser:
     # 标签富化
     # ==================================================================
 
-    async def enrich_tags(self, user_tag: str) -> list[str]:
+    async def enrich_tags(self, user_tag: str) -> dict:
         """
-        将用户的中文搜索词转换为 Pixiv 常用标签（日文/英文）。
+        将用户的中文搜索词转换为 Pixiv 多维标签。
 
-        用 LLM 生成 2-3 个 Pixiv 上最可能找到高质量结果的搜索标签。
-        返回按优先级排序的标签列表。
+        用 LLM 生成 game / character / attributes 三个维度的标签（日文优先），
+        并合并为扁平列表供搜索使用。
 
         Args:
-            user_tag: 用户原始搜索词（如 "灰姑娘"、"猫耳少女"）。
+            user_tag: 用户原始搜索词（如 "碧蓝黑丝大胸色图"）。
 
         Returns:
-            标签列表（如 ["アナキオール", "NIKKE Cinderella", "灰姑娘"]）。
-            如果 LLM 不可用或关闭了标签富化，返回 [user_tag]。
+            {
+                "flat":       ["アズールレーン", "巨乳", "黒タイツ", ...],
+                "game":       ["アズールレーン"],
+                "character":  [],
+                "attributes": ["巨乳", "黒タイツ", "おっぱい"]
+            }
+            LLM 不可用或关闭富化时返回 {"flat": [user_tag], "game":[], "character":[], "attributes":[]}。
         """
+        empty = {"flat": [user_tag], "game": [], "character": [], "attributes": []}
         if not self._config.get("tag_enrichment_enabled", True):
-            return [user_tag]
+            return empty
 
         prompt = TAG_ENRICH_PROMPT + f"\n用户搜索: {user_tag}"
         response_text = await self._call_llm(
             prompt=prompt,
-            system_prompt="你是 Pixiv 标签专家。只返回 JSON 数组，不要其他内容。",
+            system_prompt="你是 Pixiv 标签专家。只返回 JSON 对象，不要其他内容。",
         )
         if not response_text:
-            return [user_tag]
+            return empty
 
         try:
             json_str = self._extract_json(response_text)
-            tags = json.loads(json_str)
-            if isinstance(tags, list) and len(tags) > 0:
-                # 确保原始标签也在列表中（作为兜底）
-                if user_tag not in tags:
-                    tags.append(user_tag)
-                logger.info(f"[pixiv:intent] 标签富化: '{user_tag}' → {tags}")
-                return tags
+            data = json.loads(json_str)
+            if not isinstance(data, dict):
+                return empty
+
+            game = data.get("game", []) or []
+            character = data.get("character", []) or []
+            raw_attrs = data.get("attributes", []) or []
+
+            # 兼容旧格式（扁平列表）和新格式（同义词组）
+            # 旧格式: ["巨乳", "黒タイツ"] → 每组一个标签
+            # 新格式: [{"tags":["巨乳","おっぱい"],"label":"大胸"}, ...]
+            attr_groups = []
+            if raw_attrs and isinstance(raw_attrs[0], dict):
+                attr_groups = [
+                    {"tags": g.get("tags", [g.get("label", "")]), "label": g.get("label", "")}
+                    for g in raw_attrs if g.get("tags")
+                ]
+            elif raw_attrs and isinstance(raw_attrs[0], str):
+                # 旧格式回退：每个标签独立成组
+                attr_groups = [{"tags": [t], "label": t} for t in raw_attrs]
+
+            # 合并为扁平列表（game → character → 所有 tags 顺序）
+            flat = []
+            seen = set()
+            for tag in game + character:
+                if tag and tag not in seen:
+                    flat.append(tag)
+                    seen.add(tag)
+            for g in attr_groups:
+                for tag in g["tags"]:
+                    if tag and tag not in seen:
+                        flat.append(tag)
+                        seen.add(tag)
+
+            result = {
+                "flat": flat if flat else [user_tag],
+                "game": game,
+                "character": character,
+                "attributes": attr_groups,  # 新格式: 同义词组列表
+            }
+            logger.info(
+                f"[pixiv:intent] 标签富化: '{user_tag}' → flat={flat}, "
+                f"game={game}, attr_groups={[g['label'] for g in attr_groups]}"
+            )
+            return result
         except (json.JSONDecodeError, TypeError) as e:
             logger.warning(f"[pixiv:intent] 标签富化 JSON 解析失败: {e}")
 
-        return [user_tag]
+        return empty
 
     # ==================================================================
     # 统一 LLM 调用

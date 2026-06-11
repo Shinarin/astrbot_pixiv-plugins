@@ -629,63 +629,200 @@ class PixivClient:
         dedup_mgr,
         r18_mode: str = "safe",
         max_pages_per_tag: int = 0,
+        enrichment: dict | None = None,
     ) -> Optional[IllustInfo]:
         """
-        多标签智能搜索：优先组合标签（AND 搜索），再依次尝试单个标签。
+        多维标签智能搜索。
 
-        策略：
-          1. 组合标签: tag[0] + tag[-2]（游戏/系列 + 角色名，如 "原神 ニコ"）
-          2. 组合标签: 全部标签空格拼接（最精准，如 "原神 天使 ニコ"）
-          3. 单个标签依次尝试（回退）
+        当提供 enrichment（结构化标签维度）时，采用分级采集+池化随机策略：
+          阶段 0: game + 每组随机1个tag 全量组合（最多5次随机尝试）→ 命中即返回
+          阶段 1: game × 每组随机1个tag 逐一组合 → 池化 → 加权随机
+          阶段 2: 单个维度标签搜索 → 池化 → 加权随机
+          阶段 3: 扁平标签逐个短路搜索（兜底）
 
-        Pixiv API 以空格分隔的词做 AND 搜索，能精准定位"某游戏的某角色"。
+        无 enrichment 时回退为简单的扁平标签逐个短路搜索。
+
+        Pixiv API 以空格分隔的词做 AND 搜索，能精准定位多条件作品。
         """
+        import random
+
         if max_pages_per_tag <= 0:
             max_pages_per_tag = self._config.get("search_max_pages", 10)
 
-        # ---- 仅当有 ≥2 个非原始标签时尝试组合搜索 ----
-        # 最后一个是 enrich_tags() 追加的原始查询（如"原神角色天使尼可"），
-        # 这种超长短语在 Pixiv 不存在，排除它以提升组合搜索命中率
-        searchable = tags[:-1] if len(tags) > 2 else tags
-        if len(searchable) >= 2:
-            # 组合 1: 首标签 + 尾标签（游戏/系列 + 角色名，如 "原神 ニコ"）
-            pair = f"{searchable[0]} {searchable[-1]}"
-            logger.info(f"[pixiv:client] 🔗 组合搜索: '{pair}'")
-            result = await self.find_fresh_illust(
-                tag=pair,
-                session_id=session_id,
-                dedup_mgr=dedup_mgr,
-                r18_mode=r18_mode,
-                max_pages=max_pages_per_tag,
-            )
-            if result is not None:
-                logger.info(f"[pixiv:client] ✅ 组合标签 '{pair}' 找到作品: {result.illust_id}")
-                return result
+        # ---- 结构化多维搜索（有 enrichment 时） ----
+        if enrichment:
+            game_tags = enrichment.get("game", []) or []
+            char_tags = enrichment.get("character", []) or []
+            # 同义词组：[{"tags":["巨乳","おっぱい"],"label":"大胸"}, ...]
+            attr_groups = enrichment.get("attributes", []) or []
 
-            # 组合 2: 全部搜索标签拼接（更精准但可能命中少）
-            if len(searchable) >= 3:
-                all_combined = " ".join(searchable)
-                logger.info(f"[pixiv:client] 🔗 组合搜索: '{all_combined}'")
+            # 辅助: 从每组随机抽1个tag
+            def _pick_random_tag(group: dict) -> str:
+                tags = group.get("tags", [])
+                return random.choice(tags) if tags else ""
+
+            pool: list[IllustInfo] = []
+            # 基础标签：游戏 + 角色（有就加上，无则为空）
+            base_tags = game_tags + char_tags
+
+            # ============================================================
+            # 阶段 0: 降维梯度搜索（k=N → 2，每级最多5次随机）
+            #   base + N属性全量 → base + N-1随机属性 → ... → base + 2属性
+            #   k=1 由阶段 1 池化处理，不重复
+            # ============================================================
+            if attr_groups:
+                N = len(attr_groups)
+                for k in range(N, 1, -1):
+                    tried = set()
+                    for attempt in range(5):
+                        selected = attr_groups if k == N else random.sample(attr_groups, k=k)
+                        picked = [_pick_random_tag(g) for g in selected]
+                        picked = [t for t in picked if t]
+                        if not picked:
+                            break
+                        combined = " ".join(base_tags + picked)
+                        if combined in tried or not combined.strip():
+                            continue
+                        tried.add(combined)
+                        sel_labels = [g.get("label", "?") for g in selected]
+                        logger.info(
+                            f"[pixiv:client] 🔗 阶段0(k={k}/{N}) 第{attempt+1}次: '{combined}' "
+                            f"(维度: {sel_labels})"
+                        )
+                        result = await self.find_fresh_illust(
+                            tag=combined, session_id=session_id,
+                            dedup_mgr=dedup_mgr, r18_mode=r18_mode,
+                            max_pages=max_pages_per_tag,
+                        )
+                        if result:
+                            logger.info(
+                                f"[pixiv:client] ✅ 阶段0(k={k}) 命中: "
+                                f"id={result.illust_id}, ❤️{result.bookmarks}"
+                            )
+                            return result
+                    if tried:
+                        logger.info(
+                            f"[pixiv:client] 阶段0(k={k}/{N}) 全部{len(tried)}种组合无结果"
+                        )
+
+            # ============================================================
+            # 阶段 1: base × 每组随机1个tag 逐一组合 → 池化
+            # ============================================================
+            if base_tags and attr_groups:
+                for ag in attr_groups:
+                    tag = _pick_random_tag(ag)
+                    if not tag:
+                        continue
+                    combined = " ".join(base_tags + [tag])
+                    logger.info(f"[pixiv:client] 🔗 阶段1 组合搜索: '{combined}'")
+                    result = await self.find_fresh_illust(
+                        tag=combined, session_id=session_id,
+                        dedup_mgr=dedup_mgr, r18_mode=r18_mode,
+                        max_pages=max_pages_per_tag,
+                    )
+                    if result:
+                        pool.append(result)
+                if pool:
+                    weights = [info.bookmarks + 1 for info in pool]
+                    picked = random.choices(pool, weights=weights, k=1)[0]
+                    logger.info(
+                        f"[pixiv:client] ✅ 阶段1 从池({len(pool)}张) 加权随机选中: "
+                        f"id={picked.illust_id}, ❤️{picked.bookmarks}"
+                    )
+                    return picked
+
+            # ============================================================
+            # 阶段 1b: character × game 组合（如有角色）
+            # ============================================================
+            if char_tags and game_tags:
+                for c in char_tags:
+                    for g in game_tags:
+                        combined = f"{g} {c}"
+                        logger.info(f"[pixiv:client] 🔗 阶段1b 组合搜索: '{combined}'")
+                        result = await self.find_fresh_illust(
+                            tag=combined, session_id=session_id,
+                            dedup_mgr=dedup_mgr, r18_mode=r18_mode,
+                            max_pages=max_pages_per_tag,
+                        )
+                        if result:
+                            pool.append(result)
+                if pool:
+                    weights = [info.bookmarks + 1 for info in pool]
+                    picked = random.choices(pool, weights=weights, k=1)[0]
+                    logger.info(
+                        f"[pixiv:client] ✅ 阶段1b 从池({len(pool)}张) 加权随机选中: "
+                        f"id={picked.illust_id}, ❤️{picked.bookmarks}"
+                    )
+                    return picked
+
+            # ============================================================
+            # 阶段 2: game + character 单个标签搜索 → 池化
+            #          属性标签不单独搜（太泛），只搜 game 和 character
+            # ============================================================
+            for tag_list_name, tag_list in [("game", game_tags), ("character", char_tags)]:
+                for single_tag in tag_list:
+                    logger.info(f"[pixiv:client] 🔗 阶段2 单标签搜索({tag_list_name}): '{single_tag}'")
+                    result = await self.find_fresh_illust(
+                        tag=single_tag, session_id=session_id,
+                        dedup_mgr=dedup_mgr, r18_mode=r18_mode,
+                        max_pages=max_pages_per_tag,
+                    )
+                    if result:
+                        pool.append(result)
+                if pool:
+                    weights = [info.bookmarks + 1 for info in pool]
+                    picked = random.choices(pool, weights=weights, k=1)[0]
+                    logger.info(
+                        f"[pixiv:client] ✅ 阶段2 从池({len(pool)}张) 加权随机选中: "
+                        f"id={picked.illust_id}, ❤️{picked.bookmarks}"
+                    )
+                    return picked
+
+            # 阶段 2 也搜属性标签的第一个 tag（作为兜底）
+            for ag in attr_groups:
+                first_tag = ag.get("tags", [None])[0] if ag.get("tags") else None
+                if not first_tag:
+                    continue
+                logger.info(f"[pixiv:client] 🔗 阶段2 单标签搜索(attr): '{first_tag}'")
                 result = await self.find_fresh_illust(
-                    tag=all_combined,
-                    session_id=session_id,
-                    dedup_mgr=dedup_mgr,
-                    r18_mode=r18_mode,
+                    tag=first_tag, session_id=session_id,
+                    dedup_mgr=dedup_mgr, r18_mode=r18_mode,
                     max_pages=max_pages_per_tag,
                 )
-                if result is not None:
-                    logger.info(f"[pixiv:client] ✅ 组合标签 '{all_combined}' 找到作品: {result.illust_id}")
-                    return result
+                if result:
+                    pool.append(result)
+            if pool:
+                weights = [info.bookmarks + 1 for info in pool]
+                picked = random.choices(pool, weights=weights, k=1)[0]
+                logger.info(
+                    f"[pixiv:client] ✅ 阶段2(attr) 从池({len(pool)}张) 加权随机选中: "
+                    f"id={picked.illust_id}, ❤️{picked.bookmarks}"
+                )
+                return picked
 
-        # ---- 回退: 单个标签依次尝试 ----
-        empty_tag_count = 0  # 连续首页为空的标签计数
+            # ============================================================
+            # 阶段 3: 扁平标签逐个短路搜索（兜底）
+            # ============================================================
+            flat_tags = enrichment.get("flat", tags)
+            for tag in flat_tags:
+                logger.info(f"[pixiv:client] 阶段3 尝试标签: '{tag}'")
+                result = await self.find_fresh_illust(
+                    tag=tag, session_id=session_id,
+                    dedup_mgr=dedup_mgr, r18_mode=r18_mode,
+                    max_pages=max_pages_per_tag,
+                )
+                if result:
+                    logger.info(f"[pixiv:client] ✅ 标签 '{tag}' 找到作品: {result.illust_id}")
+                    return result
+            return None
+
+        # ---- 无 enrichment: 扁平标签逐个短路搜索（向后兼容） ----
+        empty_tag_count = 0
         for tag in tags:
             logger.info(f"[pixiv:client] 尝试标签: '{tag}'")
             result = await self.find_fresh_illust(
-                tag=tag,
-                session_id=session_id,
-                dedup_mgr=dedup_mgr,
-                r18_mode=r18_mode,
+                tag=tag, session_id=session_id,
+                dedup_mgr=dedup_mgr, r18_mode=r18_mode,
                 max_pages=max_pages_per_tag,
             )
             if result is not None:
@@ -694,7 +831,6 @@ class PixivClient:
             empty_tag_count += 1
             logger.debug(f"[pixiv:client] 标签 '{tag}' 未找到新鲜作品，尝试下一个...")
 
-            # 连续多个标签首页均为空 → 大概率是 token 过期
             if empty_tag_count >= 3:
                 logger.error(
                     f"[pixiv:client] 🔴 连续 {empty_tag_count} 个标签首页无结果！"
