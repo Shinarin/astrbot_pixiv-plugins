@@ -664,14 +664,23 @@ class PixivClient:
             pool: list[IllustInfo] = []
             # 基础标签：游戏 + 角色（有就加上，无则为空）
             base_tags = game_tags + char_tags
+            # 池积累目标（≥此停止）和最低接受（<此则降级继续）
+            threshold = max(5, int(self._config.get("stage0_pool_threshold", 30) or 30))
+            min_pool = max(5, int(self._config.get("stage0_min_pool", 10) or 10))
+            if threshold < min_pool:
+                threshold = min_pool
 
             # ============================================================
-            # 阶段 0: 降维梯度搜索（k=N → 2，每级最多5次随机）
-            #   base + N属性全量 → base + N-1随机属性 → ... → base + 2属性
+            # 阶段 0: 降维梯度搜索（k=N → 2）
+            #   全局池跨 k 级积累，满 threshold 立即返回
+            #   当前 k 搜完 < min_pool → 降级 k-1 继续积累
+            #   k=2 搜完有图即返回（最后一层不降级）
             #   k=1 由阶段 1 池化处理，不重复
             # ============================================================
             if attr_groups:
                 N = len(attr_groups)
+                global_pool: list[IllustInfo] = []
+                global_seen: set[int] = set()
                 for k in range(N, 1, -1):
                     tried = set()
                     for attempt in range(5):
@@ -689,21 +698,45 @@ class PixivClient:
                             f"[pixiv:client] 🔗 阶段0(k={k}/{N}) 第{attempt+1}次: '{combined}' "
                             f"(维度: {sel_labels})"
                         )
-                        result = await self.find_fresh_illust(
+                        fresh = await self.collect_fresh_illusts(
                             tag=combined, session_id=session_id,
                             dedup_mgr=dedup_mgr, r18_mode=r18_mode,
                             max_pages=max_pages_per_tag,
                         )
-                        if result:
+                        for info in fresh:
+                            if info.illust_id not in global_seen:
+                                global_seen.add(info.illust_id)
+                                global_pool.append(info)
+
+                        if len(global_pool) >= threshold:
                             logger.info(
-                                f"[pixiv:client] ✅ 阶段0(k={k}) 命中: "
-                                f"id={result.illust_id}, ❤️{result.bookmarks}"
+                                f"[pixiv:client] 阶段0(k={k}) 池已达{len(global_pool)}张(≥{threshold})，停止"
                             )
-                            return result
-                    if tried:
+                            break
+
+                    # 判断是否接受当前结果
+                    if len(global_pool) >= threshold:
+                        break  # 够了，跳出 k 循环
+                    if k == 2:
+                        break  # 最后一层，不再降级
+                    if len(global_pool) < min_pool:
                         logger.info(
-                            f"[pixiv:client] 阶段0(k={k}/{N}) 全部{len(tried)}种组合无结果"
+                            f"[pixiv:client] 阶段0(k={k}/{N}) 池仅{len(global_pool)}张"
+                            f"(<{min_pool})，降级到 k={k-1} 继续积累"
                         )
+                    else:
+                        break  # 虽未达阈值但 ≥ 最低接受，不降级
+
+                if global_pool:
+                    weights = [info.bookmarks + 1 for info in global_pool]
+                    picked = random.choices(global_pool, weights=weights, k=1)[0]
+                    logger.info(
+                        f"[pixiv:client] ✅ 阶段0 从全局池({len(global_pool)}张) "
+                        f"加权选中: id={picked.illust_id}, ❤️{picked.bookmarks}"
+                    )
+                    return picked
+
+                logger.info(f"[pixiv:client] 阶段0 全局池0结果，进入阶段1")
 
             # ============================================================
             # 阶段 1: base × 每组随机1个tag 逐一组合 → 池化
@@ -1058,6 +1091,36 @@ class PixivClient:
 
         logger.warning(f"[pixiv:client] 搜索 {max_pages} 页未找到新鲜作品: tag='{tag}'")
         return None
+
+    # ------------------------------------------------------------------
+    # 便捷方法: 收集所有未发送的新鲜作品（不做加权随机）
+    # ------------------------------------------------------------------
+
+    async def collect_fresh_illusts(
+        self,
+        tag: str,
+        session_id: str,
+        dedup_mgr,
+        r18_mode: str = "safe",
+        max_pages: int = 0,
+    ) -> list[IllustInfo]:
+        """按标签搜索，收集所有新鲜作品列表（不做加权随机）。用于阶段0池积累。"""
+        if max_pages <= 0:
+            max_pages = self._config.get("search_max_pages", 10)
+
+        fresh_pool: list[IllustInfo] = []
+        for page in range(1, max_pages + 1):
+            results = await self.search_by_tag(tag, page=page, r18_mode=r18_mode)
+            if page == 1 and not results:
+                logger.info(f"[pixiv:client] collect: 标签'{tag}' 首页无结果，跳过翻页")
+                break
+            for info in results:
+                if not dedup_mgr.is_duplicate(info.illust_id, session_id):
+                    fresh_pool.append(info)
+
+        if fresh_pool:
+            self.note_search_success()
+        return fresh_pool
 
     # ------------------------------------------------------------------
     # 内部工具方法

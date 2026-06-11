@@ -763,23 +763,38 @@ class AstrBotPixivPlugin(Star):
             for group in wanted_attrs:
                 tags = group.get("tags", [])
                 label = group.get("label", "")
-                # 任一个 tag 命中图片标签即覆盖
-                if any(tag.lower() in img_tags for tag in tags):
+                # 任一个 tag 是图片标签的子串即覆盖
+                #   例: 图片标签 "着衣巨乳" 被子串 "巨乳" 命中
+                covered = False
+                for tag in tags:
+                    tag_low = tag.lower()
+                    for it in img_tags:
+                        if tag_low in it:
+                            covered = True
+                            break
+                    if covered:
+                        break
+                if covered:
                     continue
                 missing.append(label or tags[0] if tags else "?")
         else:
-            # 旧格式: 扁平列表（向后兼容）
+            # 旧格式: 扁平列表（向后兼容，子串匹配）
             for attr in wanted_attrs:
-                if isinstance(attr, str) and attr.lower() not in img_tags:
-                    missing.append(attr)
+                if isinstance(attr, str):
+                    if not any(attr.lower() in it for it in img_tags):
+                        missing.append(attr)
 
-        # 检查 game 维度（game 缺失不报告，仅记录）
+        # 检查 game 维度（子串匹配，game 缺失不报告仅记录）
         wanted_games = enrichment.get("game", []) or []
-        game_covered = any(g.lower() in img_tags for g in wanted_games)
+        game_covered = any(
+            g.lower() in it for g in wanted_games for it in img_tags
+        )
 
-        # 检查 character 维度（character 缺失不报告，仅记录）
+        # 检查 character 维度（子串匹配，character 缺失不报告仅记录）
         wanted_chars = enrichment.get("character", []) or []
-        char_covered = any(c.lower() in img_tags for c in wanted_chars)
+        char_covered = any(
+            c.lower() in it for c in wanted_chars for it in img_tags
+        )
 
         if not missing:
             return None

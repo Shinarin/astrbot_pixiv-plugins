@@ -45,6 +45,8 @@ DEFAULT_CONFIG = {
     "content_moderation_enabled": False,
     "content_moderation_provider": "",
     "nsfw_threshold": 9,
+    "stage0_pool_threshold": 30,
+    "stage0_min_pool": 10,
 }
 
 
@@ -60,12 +62,22 @@ class ConfigManager:
         self._config = astrbot_config if astrbot_config is not None else {}
 
     def get(self, key: str, default: Any = None) -> Any:
-        """获取配置项，优先 AstrBot 配置 → DEFAULT_CONFIG → default。"""
+        """获取配置项，优先 AstrBot 配置 → DEFAULT_CONFIG → default。
+        特殊处理: stage0_pool_threshold 最低强制为 5。"""
         if key in self._config:
-            return self._config[key]
-        if key in DEFAULT_CONFIG:
-            return DEFAULT_CONFIG[key]
-        return default
+            val = self._config[key]
+        elif key in DEFAULT_CONFIG:
+            val = DEFAULT_CONFIG[key]
+        else:
+            return default
+
+        if key == "stage0_pool_threshold":
+            raw = int(val) if val is not None else 5
+            return max(5, raw)
+        if key == "stage0_min_pool":
+            raw = int(val) if val is not None else 5
+            return max(5, raw)
+        return val
 
     def set(self, key: str, value: Any) -> None:
         """设置配置项（仅内存，持久化由 AstrBot 的 config.save_config() 负责）。"""
