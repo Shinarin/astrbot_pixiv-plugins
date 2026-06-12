@@ -663,7 +663,7 @@ class AstrBotPixivPlugin(Star):
         moderation_on = self.config_mgr.get("content_moderation_enabled", False)
 
         if info.is_multi_page:
-            # 多图作品优先取原图（内部自动从 large 反推 original URL）
+            # 多图作品取 img-master 完整分辨率（去 CDN 尺寸前缀）
             page_urls = info.get_page_urls_for_quality("original", max_pages)
             total_pages = info.page_count
             for pi, page_url in enumerate(page_urls):

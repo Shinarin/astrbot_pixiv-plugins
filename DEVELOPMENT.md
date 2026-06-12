@@ -194,7 +194,7 @@ search_by_tags(flat, enrichment)    ← 4 阶段分级搜索
 | `search_by_tags()` | `pixiv_client.py` | 4 阶段分级搜索：降维梯度(每级5次随机)→base×attr池化→单维度池化→flat短路 |
 | `collect_fresh_illusts()` | `pixiv_client.py` | 同 find_fresh_illust 池收集逻辑，返回完整列表供阶段0池积累 |
 | `find_fresh_illust()` | `pixiv_client.py` | 遍历多页收集未发送作品，加权随机选图；高质量无结果时回退 |
-| `_convert_to_original_url()` | `pixiv_client.py` | 从 Pixiv large URL 反推 original URL（img-master→img-original，去 _master1200） |
+| `_strip_cdn_sizing()` | `pixiv_client.py` | 去掉 Pixiv CDN 尺寸/质量前缀 /c/WxH_Q/，保留 img-master 完整分辨率（漫画无 img-original） |
 | `_ensure_connection()` | `dedup_manager.py` | 数据库连接健康检查与自动重连 |
 
 ---

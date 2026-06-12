@@ -1,5 +1,13 @@
 # What's Changed
 
+> 📢 v1.0.8 → v1.0.9
+
+## 🐛 修复
+
+- **多图 original URL 构造错误**：v1.0.8 的 `_convert_to_original_url()` 错误地将漫画 URL 从 `img-master` 转为 `img-original`，但 Pixiv CDN 对漫画不提供 `img-original` 路径导致 404。改为 `_strip_cdn_sizing()` 仅去掉 CDN 尺寸前缀 `/c/WxH_Q/`，保留 `img-master` 完整分辨率
+
+---
+
 > 📢 v1.0.7 → v1.0.8
 
 ## 🐛 修复
