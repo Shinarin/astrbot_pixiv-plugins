@@ -1,5 +1,18 @@
 # What's Changed
 
+> 📢 v1.0.9 → v1.0.10
+
+## 🔧 优化
+
+- **LLM 意图分类精确化**：重写 `INTENT_CLASSIFY_PROMPT`，明确 Pixiv 是插画艺术平台而非通用图片搜索。新增"表情包/梗图/照片/截图"等反面示例，LLM 不再误判非插画请求
+- **静默放行非搜图消息**：`UNKNOWN` 意图不再反问用户，改为直接放行透传。`FIND_BY_TAG`/`FIND_BY_ID` 缺参数时同样放行，不再拦截正常聊天
+
+## 🐛 修复
+
+- **LLM Tool 函数签名**：`_tool_search_*` 改为 `async def` 且参数设默认值，修复 AstrBot `call_event_hook` 调用时报 `AssertionError` 和 `missing required positional argument` 的问题
+
+---
+
 > 📢 v1.0.8 → v1.0.9
 
 ## 🐛 修复

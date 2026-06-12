@@ -220,13 +220,17 @@ class AstrBotPixivPlugin(Star):
         except Exception as e:
             logger.warning(f"[pixiv] LLM Tool 注册失败: {e}")
 
-    def _tool_search_by_id(self, illust_id: int) -> str:
+    async def _tool_search_by_id(self, event, context, illust_id: int = 0) -> str:
+        if not illust_id:
+            return "[pixiv] 请提供作品 ID"
         return f"[pixiv] 请使用 /pixiv id {illust_id} 指令来搜索该作品"
 
-    def _tool_search_by_tag(self, tag: str) -> str:
+    async def _tool_search_by_tag(self, event, context, tag: str = "") -> str:
+        if not tag:
+            return "[pixiv] 请提供搜索标签"
         return f"[pixiv] 请使用 /pixiv tag {tag} 指令来搜索相关作品"
 
-    def _tool_toggle_r18(self, enable: bool) -> str:
+    async def _tool_toggle_r18(self, event, context, enable: bool = False) -> str:
         action = "开启" if enable else "关闭"
         return f"[pixiv] R18 过滤已{action}"
 
@@ -436,11 +440,6 @@ class AstrBotPixivPlugin(Star):
 
         session_id = event.get_session_id()
 
-        if self.conv_state.is_waiting(session_id):
-            async for r in self._handle_clarification_response(message, session_id, event):
-                yield r
-            return
-
         from src.intent_parser import IntentType
 
         intent_result = await self.intent_parser.parse(
@@ -469,9 +468,11 @@ class AstrBotPixivPlugin(Star):
                 yield r
             event.stop_event()
         elif intent_type == IntentType.UNKNOWN:
-            async for r in self._nl_unknown(message, session_id, event):
-                yield r
-            event.stop_event()
+            # 意图不明 → 直接放行，不反问不拦截
+            event.clear_result()
+            event.continue_event()
+            # 清理可能残留的等待状态
+            await self.conv_state.clear(session_id)
         else:
             # 非图片请求 → 清除插件空结果，原话交给 AstrBot
             event.clear_result()
@@ -484,8 +485,9 @@ class AstrBotPixivPlugin(Star):
     async def _nl_find_by_id(self, intent_result, event, session_id):
         illust_id = intent_result.params.get("illust_id")
         if not illust_id:
-            await self.conv_state.set_waiting(session_id, intent_result.raw_message)
-            yield event.plain_result("🤔 您想找哪个作品呢？请提供作品 ID（纯数字）。")
+            # 缺少 ID → 静默放行，不反问
+            event.clear_result()
+            event.continue_event()
             return
         async for r in self.cmd_pixiv_id(event, str(illust_id)):
             yield r
@@ -494,11 +496,9 @@ class AstrBotPixivPlugin(Star):
         """自然语言 → 按标签搜索。"""
         tag = intent_result.params.get("tag")
         if not tag:
-            clarification = await self.intent_parser.generate_clarification(
-                intent_result.raw_message, event
-            )
-            await self.conv_state.set_waiting(session_id, intent_result.raw_message)
-            yield event.plain_result(f"🤔 {clarification}")
+            # 缺少标签 → 静默放行，不反问
+            event.clear_result()
+            event.continue_event()
             return
         raw_count = intent_result.params.get("count", 0)
         max_n = self.config_mgr.get("max_images_per_request", 3)
@@ -511,44 +511,6 @@ class AstrBotPixivPlugin(Star):
         action = "on" if enable else "off"
         async for r in self.cmd_pixiv_r18(event, action):
             yield r
-
-    async def _nl_unknown(self, message, session_id, event):
-        clarification = await self.intent_parser.generate_clarification(message, event)
-        await self.conv_state.set_waiting(session_id, message)
-        yield event.plain_result(f"🤔 {clarification}")
-
-    async def _handle_clarification_response(self, message, session_id, event):
-        from src.intent_parser import IntentType
-
-        intent_result = await self.intent_parser.parse(
-            message=message, session_id=session_id, event=event,
-        )
-        if intent_result.intent_type in (
-            IntentType.FIND_BY_ID, IntentType.FIND_BY_TAG,
-            IntentType.TOGGLE_R18, IntentType.HELP,
-        ):
-            await self.conv_state.clear(session_id)
-            if intent_result.intent_type == IntentType.FIND_BY_ID:
-                async for r in self._nl_find_by_id(intent_result, event, session_id):
-                    yield r
-            elif intent_result.intent_type == IntentType.FIND_BY_TAG:
-                async for r in self._nl_find_by_tag(intent_result, event, session_id):
-                    yield r
-            elif intent_result.intent_type == IntentType.TOGGLE_R18:
-                async for r in self._nl_toggle_r18(intent_result, event):
-                    yield r
-            elif intent_result.intent_type == IntentType.HELP:
-                async for r in self.cmd_pixiv_help(event):
-                    yield r
-        else:
-            await self.conv_state.clear(session_id)
-            yield event.plain_result(
-                "😔 抱歉，仍然无法理解您的需求。\n\n"
-                "请使用以下明确指令：\n"
-                "• `/pixiv id <作品ID>` — 按 ID 搜索\n"
-                "• `/pixiv tag <标签>` — 按标签搜索\n"
-                "• `/pixiv help` — 查看帮助"
-            )
 
     # ==================================================================
     # 核心: 按标签搜索并发送多张图片
